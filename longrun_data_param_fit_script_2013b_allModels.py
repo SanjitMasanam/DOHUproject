@@ -1106,15 +1106,7 @@ for run_type in [3, 2, 1]:
                     F_ref - lmbda * T_obs_roll - (epsilon - 1.0) * H_fit_roll,
                     label=r"$F-\lambda T-(\epsilon-1)H$",
                 )
-            
-                # Optional: also show the epsilon correction alone
-                ax.plot(
-                    t_roll,
-                    -(epsilon - 1.0) * H_fit_roll,
-                    ls="--",
-                    label=r"$-(\epsilon-1)H$",
-                )
-            
+                
             if results == "unblinded":
                 ax.plot(t, N_fit, label="EBM-ε fit")
             
