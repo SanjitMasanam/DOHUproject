@@ -1080,14 +1080,44 @@ for run_type in [3, 2, 1]:
             # ----------------- NETTOA time-series plot -----------------
             T_obs_roll = rolling_mean(T_obs, window=10)
             N_obs_roll = rolling_mean(N_obs, window=10)
+            
+            H_fit = H_physical_from_previous_solution(
+                t,
+                F_ref=F_ref,
+                lmbda=lmbda,
+                C=C,
+                epsilon=epsilon,
+                T_eq=T_eq,
+                a_f=a_f,
+                a_s=a_s,
+                tau_f=tau_f,
+                tau_s=tau_s,
+            )
+            H_fit_roll = rolling_mean(H_fit, window=10)
+            
             t_roll = t[: len(N_obs_roll)]
-
+            
             ax = nettoa_axs[imodel]
             if len(N_obs_roll) > 0:
-               ax.plot(t_roll, N_obs_roll, color="black", label="AOGCM")
-               ax.plot(t_roll, F_ref - lmbda * T_obs_roll, label=r"$F-\lambda T$ linear term")
+                ax.plot(t_roll, N_obs_roll, color="black", label="AOGCM")
+            
+                ax.plot(
+                    t_roll,
+                    F_ref - lmbda * T_obs_roll - (epsilon - 1.0) * H_fit_roll,
+                    label=r"$F-\lambda T-(\epsilon-1)H$",
+                )
+            
+                # Optional: also show the epsilon correction alone
+                ax.plot(
+                    t_roll,
+                    -(epsilon - 1.0) * H_fit_roll,
+                    ls="--",
+                    label=r"$-(\epsilon-1)H$",
+                )
+            
             if results == "unblinded":
-               ax.plot(t, N_fit, label="EBM-ε fit")
+                ax.plot(t, N_fit, label="EBM-ε fit")
+            
             ax.set_title(f"{model} 4xCO2 Net TOA (W m$^{{-2}}$)")
             ax.set_xlabel("Time (years)")
             ax.set_ylabel("Net TOA (10 yr rolling mean)")
