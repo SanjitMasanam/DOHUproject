@@ -29,6 +29,7 @@ from typing import Dict, Iterable, Tuple
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 import rpy2.robjects as ro
 import sympy as sp
 from matplotlib.lines import Line2D
@@ -36,8 +37,8 @@ from scipy.optimize import curve_fit
 
 # ------------------------- User settings -------------------------
 
-run_type = 1
-results = "validation"
+run_type = 3
+results = "unblinded"
 lin = True
 
 # Use at least 3 iterations to match your original script, but allow convergence.
@@ -756,6 +757,8 @@ if not converged:
 
 # Final parameter table.
 df.to_csv(outdir / current_dir / "tables" / "params_final.csv", index=False)
+# Match the output location used by 2013a_allModels.py.
+df.to_csv(outdir / current_dir / "fitted_model_params.csv", index=False)
 print(df)
 
 
@@ -899,71 +902,308 @@ else:
     print("Skipping validation plot: none of the hard-coded paper model names are present in df.")
 
 
-# ------------------------- Final temperature-response plots -------------------------
+# ------------------------- Final result plots -------------------------
 
-final_fig, final_axs = make_model_grid(models, width_per_ax=10.8, height_per_ax=7.2, dpi=120)
+# These plots intentionally mirror the final plotting block in
+# 2013a_allModels.py, while using the EBM-epsilon parameterization.
+#
+# IMPORTANT: this is separate from the calibration bundle above.
+# In 2013a_allModels.py, changing results from "validation" to
+# "unblinded" changes how much of the 4xCO2/piControl data is shown:
+#   - validation: first 151 values
+#   - unblinded: full available time series
+# The helper below preserves that behavior for the 2013b script.
+
+VALIDATION_PLOT_YEARS = 151
+
+# Approximate transient climate response values used by the OHC-vs-Ts
+# unblinded plot in 2013a_allModels.py.
+tcr = {
+    "CCSM3": 1.7,
+    "CESM1": 2.0,
+    "CNRMCM6": 2.1,
+    "ECHAM5": 3.0,
+    "GISSE2R": 1.5,
+    "IPSLCM5A": 2.3,
+    "HadGEM2": 2.5,
+    "MPIESM11": 2.0,
+}
+
+
+def make_result_series(model_data, results):
+    """
+    Return the plotting time series with the same validation/unblinded
+    selection logic as 2013a_allModels.py.
+
+    The calibration code uses a fixed, internally consistent calibration
+    bundle. This helper is only for final plotting and intentionally
+    follows the result-window behavior of the 2013a script.
+    """
+    T_ctrl_raw = get_r_array(model_data, "piControl", "T2M")
+    N_ctrl_raw = get_r_array(model_data, "piControl", "NETTOA")
+    T_4x_raw = get_r_array(model_data, "4xCO2", "T2M")
+    N_4x_raw = get_r_array(model_data, "4xCO2", "NETTOA")
+
+    if results == "validation":
+        T_ctrl = T_ctrl_raw[:VALIDATION_PLOT_YEARS]
+        N_ctrl = N_ctrl_raw[:VALIDATION_PLOT_YEARS]
+        T_4x = T_4x_raw[:VALIDATION_PLOT_YEARS]
+        N_4x = N_4x_raw[:VALIDATION_PLOT_YEARS]
+    elif results == "unblinded":
+        T_ctrl = T_ctrl_raw
+        N_ctrl = N_ctrl_raw
+        T_4x = T_4x_raw
+        N_4x = N_4x_raw
+    else:
+        raise ValueError("results must be either 'validation' or 'unblinded'.")
+
+    if SUBTRACT_PICONTROL_BASELINE:
+        T_base = float(np.nanmean(T_ctrl))
+        N_base = float(np.nanmean(N_ctrl))
+    else:
+        T_base = 0.0
+        N_base = 0.0
+
+    T = T_4x - T_base
+    N = N_4x - N_base
+    t = np.arange(1, 1 + len(T), dtype=float)
+
+    good = finite_pair_mask(t, T, N)
+    return t[good], T[good], N[good]
+
+
+def ebm_epsilon_nettoa(t, F_ref, lmbda, epsilon, C, T_eq, a_f, a_s, tau_f, tau_s):
+    """TOA imbalance from the final EBM-epsilon solution."""
+    T_fit = T_model(t, T_eq, a_f, a_s, tau_f, tau_s)
+    H_fit = H_physical_from_previous_solution(
+        t,
+        F_ref=F_ref,
+        lmbda=lmbda,
+        C=C,
+        epsilon=epsilon,
+        T_eq=T_eq,
+        a_f=a_f,
+        a_s=a_s,
+        tau_f=tau_f,
+        tau_s=tau_s,
+    )
+    return F_ref - lmbda * T_fit - (epsilon - 1.0) * H_fit
+
+
+def rolling_mean(x, window=10):
+    x = np.asarray(x, dtype=float)
+    if len(x) < window:
+        return np.array([], dtype=float)
+    return np.array([np.nanmean(x[i : i + window]) for i in range(len(x) - window + 1)], dtype=float)
+
+
+final_fig, final_axs = make_model_grid(models, width_per_ax=10.8, height_per_ax=7.2, dpi=120, ncols=4)
+nettoa_fig, nettoa_axs = make_model_grid(models, width_per_ax=7, height_per_ax=5, ncols=4)
+
+# These two are only populated/saved for unblinded runs, matching 2013a_allModels.py.
+ohct_fig = None
+ohct_axs = None
+assmpt_fig = None
+assmpt_axs = None
+if results == "unblinded":
+    ohct_fig, ohct_axs = make_model_grid(models, width_per_ax=6, height_per_ax=6, ncols=4)
+    assmpt_fig, assmpt_axs = make_model_grid(models, width_per_ax=6, height_per_ax=6, ncols=4)
+
 scale = "linear" if lin else "log"
+sc_for_cbar = None
+rng = np.random.default_rng(12345)
 
 for imodel, model in enumerate(models):
-    bundle = series_by_model[model]
+    t, T_obs, N_obs = make_result_series(data.rx2(model), results)
     row = df.loc[df["model"] == model].iloc[0]
-    ax = final_axs[imodel]
 
+    F_ref = float(row["F_ref"])
+    lmbda = float(row["lambda"])
+    epsilon = float(row["epsilon"])
+    C = float(row["C"])
     T_eq = float(row["T_eq"])
     a_f = float(row["a_f"])
     a_s = float(row["a_s"])
     tau_f = float(row["tau_f"])
     tau_s = float(row["tau_s"])
 
-    t = bundle.t_full
-    T_fit = T_model(t, T_eq, a_f, a_s, tau_f, tau_s)
-
-    ax.scatter(t, bundle.T_full, s=4, color="red")
-    ax.plot(t, bundle.T_full, color="red", label="AOGCM T2M")
-    ax.plot(t, T_fit, color="blue", label="EBM-ε fit")
-
-    # Optional approximate uncertainty envelope from diagonal parameter uncertainties.
-    iterations = 1000
     T_eq_unc = float(row["T_eq_unc"])
     a_s_unc = float(row["a_s_unc"])
     tau_f_unc = float(row["tau_f_unc"])
     tau_s_unc = float(row["tau_s_unc"])
 
+    T_fit = T_model(t, T_eq, a_f, a_s, tau_f, tau_s)
+    N_fit = ebm_epsilon_nettoa(t, F_ref, lmbda, epsilon, C, T_eq, a_f, a_s, tau_f, tau_s)
+
+    # ----------------- T2M time-series plot -----------------
+    ax = final_axs[imodel]
+    ax.scatter(t, T_obs, s=4, color="red")
+    ax.plot(t, T_obs, color="red", label="2-m Surface Temp.")
+    ax.plot(t, T_fit, color="blue", label="EBM-ε Fit")
+
+    iterations = 1000
     if np.all(np.isfinite([T_eq_unc, a_s_unc, tau_f_unc, tau_s_unc])):
         param_mean = np.array([T_eq, a_s, tau_f, tau_s], dtype=float)
         param_cov = np.diag(np.array([T_eq_unc**2, a_s_unc**2, tau_f_unc**2, tau_s_unc**2], dtype=float))
-        draws = np.random.default_rng(12345).multivariate_normal(param_mean, param_cov, size=iterations)
-        T_ensemble = np.empty((iterations, t.size), dtype=float)
-        for j in range(iterations):
-            T_eq_j, a_s_j, tau_f_j, tau_s_j = draws[j]
-            a_f_j = 1.0 - a_s_j
-            if tau_f_j <= 0 or tau_s_j <= 0:
-                T_ensemble[j, :] = np.nan
-            else:
-                T_ensemble[j, :] = T_model(t, T_eq_j, a_f_j, a_s_j, tau_f_j, tau_s_j)
-        T_mean = np.nanmean(T_ensemble, axis=0)
-        T_std = np.nanstd(T_ensemble, axis=0)
-        ax.fill_between(t, T_mean - 2 * T_std, T_mean + 2 * T_std, color="blue", alpha=0.08, label="±2σ")
-        ax.fill_between(t, T_mean - T_std, T_mean + T_std, color="blue", alpha=0.20, label="±1σ")
+        params = rng.multivariate_normal(param_mean, param_cov, size=iterations)
 
-    ax.set_xlabel("Time (years)")
-    ax.set_ylabel("Temperature anomaly (K)")
-    ax.set_title(f"{model}: T2M with EBM-ε fit")
+        T_ensemble = []
+        for T_eq_i, a_s_i, tau_f_i, tau_s_i in params:
+            if tau_f_i <= 0 or tau_s_i <= 0 or a_s_i <= 0 or a_s_i >= 1:
+                continue
+            T_ensemble.append(
+                T_model(t, T_eq_i, 1.0 - a_s_i, a_s_i, tau_f_i, tau_s_i)
+            )
+
+        if len(T_ensemble) > 0:
+            T_ensemble = np.vstack(T_ensemble)
+            T_mean = np.nanmean(T_ensemble, axis=0)
+            T_std = np.nanstd(T_ensemble, axis=0)
+            ax.fill_between(t, T_mean - 2 * T_std, T_mean + 2 * T_std, color="blue", alpha=0.08, label="±2σ")
+            ax.fill_between(t, T_mean - T_std, T_mean + T_std, color="blue", alpha=0.20, label="±1σ")
+
+    ax.text(
+        0.02,
+        0.98,
+        rf"$\tau_s$ = {tau_s:.1f} yr\n$\epsilon$ = {epsilon:.2f}",
+        transform=ax.transAxes,
+        va="top",
+        ha="left",
+        fontsize=8,
+    )
+    ax.axvline(150, color="orange", linestyle=":", linewidth=1, alpha=0.7)
+    ax.set_xlabel(r"Time (years)")
+    ax.set_ylabel(r"Temperature Anomaly (K)")
+    ax.set_title(f"{model} 4xCO2: T2M w/ EBM-ε fit")
+    ax.set_ylim(1, 11)
     ax.set_xscale(scale)
+    ax.legend(fontsize=8, loc="upper right")
     if lin:
-        ax.set_xticks(np.linspace(1, np.max(t), 10))
-    ax.legend(fontsize=8)
+        ax.set_xticks(np.linspace(1, np.max(t) + 1, 10))
+        ax.set_yticks(np.linspace(1, 11, 4))
 
+    # ----------------- NETTOA time-series plot -----------------
+    T_obs_roll = rolling_mean(T_obs, window=10)
+    N_obs_roll = rolling_mean(N_obs, window=10)
+    t_roll = t[: len(N_obs_roll)]
+
+    ax = nettoa_axs[imodel]
+    if len(N_obs_roll) > 0:
+        ax.plot(t_roll, N_obs_roll, color="black", label="AOGCM")
+        ax.plot(t_roll, F_ref - lmbda * T_obs_roll, label=r"$F-\lambda T$ linear term")
+    if results == "unblinded":
+        ax.plot(t, N_fit, label="EBM-ε fit")
+    ax.set_title(f"{model} 4xCO2 Net TOA (W m$^{{-2}}$)")
+    ax.set_xlabel("Time (years)")
+    ax.set_ylabel("Net TOA (10 yr rolling mean)")
+    ax.set_xscale(scale)
+    ax.set_yscale("log")
+    ax.grid(True)
+    ax.legend(fontsize=8, loc="upper right")
+
+    if results == "unblinded":
+        # ----------------- OHC vs. T_s plot -----------------
+        t_long = np.arange(1, 1 + 100000, dtype=float)
+        T_long = T_model(t_long, T_eq, a_f, a_s, tau_f, tau_s)
+        N_long = ebm_epsilon_nettoa(t_long, F_ref, lmbda, epsilon, C, T_eq, a_f, a_s, tau_f, tau_s)
+
+        normalized_OHC_pred = (5.1e14 * 31536000 * np.cumsum(N_long)) / (1.37e21 * 3850)
+        normalized_OHC = (5.1e14 * 31536000 * np.cumsum(N_obs)) / (1.37e21 * 3850)
+
+        ax = ohct_axs[imodel]
+        cmap = plt.cm.turbo
+        norm = mpl.colors.Normalize(vmin=0, vmax=max(6000, len(T_obs)))
+        sc_for_cbar = ax.scatter(T_obs / T_eq, normalized_OHC / T_eq, c=t, cmap=cmap, norm=norm)
+
+        if len(T_obs) >= 5:
+            m_ohcTs, b_ohcTs = np.polyfit(T_obs[:5] / T_eq, normalized_OHC[:5] / T_eq, 1)
+            t_val = np.arange(0, 1.1, 0.1)
+            ax.plot(t_val, m_ohcTs * t_val + b_ohcTs, ls="--", color="red", label=f"Mixed Layer Depth = {(m_ohcTs * 2500):.0f} m")
+        else:
+            t_val = np.arange(0, 1.1, 0.1)
+
+        A = np.nan
+        if model in tcr and np.isfinite(T_eq) and T_eq != 0:
+            A = 2 * tcr[model] / T_eq
+            ax.plot(t_val, (t_val - A) / (1 - A), ls="--", color="black", label="2-box Asymptotic Pred.")
+            ax.axvline(A, color="0.55", ls="--", lw=0.8)
+
+        ax.plot(T_long / T_eq, normalized_OHC_pred / T_eq, color="green", label="EBM-ε Pred.")
+        ax.set_ylim(-0.05, 1.2)
+        ax.axvline(1.0, color="0.55", ls="--", lw=0.8)
+        ax.set_title(f"{model} 4xCO2: OHU vs. Surface Temp (Normalized)")
+        ax.set_xlabel(r"$\frac{T_s}{2\, \mathrm{ECS}}$")
+        ax.set_ylabel(r"$\frac{\mathrm{OHC}}{\mathrm{OHC}_{eq}}$")
+        ax.legend(fontsize=8, loc="upper left")
+
+        # ----------------- C dT/dt assumption-test plot -----------------
+        dT_dt_fit = np.gradient(T_fit)
+        dT_dt_true = np.gradient(T_obs_roll) if len(T_obs_roll) > 1 else np.array([], dtype=float)
+        F_thresh = F_ref / 100.0
+
+        ax = assmpt_axs[imodel]
+        if len(dT_dt_true) > 0:
+            ax.plot(t[: len(dT_dt_true)], C * dT_dt_true, color="black", label="AOGCM (10 yr running mean)")
+        ax.plot(t, C * dT_dt_fit, ls="--", color="blue", label="EBM-ε")
+        ax.axhline(F_thresh, color="0.55", ls="--", lw=0.8, label="Order of Mag. Threshold")
+        ax.set_title(f"{model} 4xCO2: Assumption 2 Test")
+        ax.set_xlabel(r"Time (years)")
+        ax.set_ylabel(r"$C_{u}\frac{dT_{u}}{dt}$")
+        ax.set_xscale("log")
+        ax.legend(fontsize=8, loc="upper right")
+
+
+# Save combined final figures with the same naming/placement pattern as 2013a_allModels.py.
 final_fig.savefig(
-    outdir / current_dir / results / "png" / f"4xCO2_all_models_T2M_vs_t_{scale}.png",
+    outdir / current_dir / results / "png" / f"4xCO2_all_models_T2m_vs_t_{results}_{scale}.png",
     dpi=200,
     bbox_inches="tight",
 )
 final_fig.savefig(
-    outdir / current_dir / results / "pdf" / f"4xCO2_all_models_T2M_vs_t_{scale}.pdf",
+    outdir / current_dir / results / "pdf" / f"4xCO2_all_models_T2m_vs_t_{results}_{scale}.pdf",
     bbox_inches="tight",
 )
 plt.close(final_fig)
 
+nettoa_fig.savefig(
+    outdir / current_dir / results / "png" / f"4xCO2_all_models_NETTOA_timeseries_{scale}.png",
+    dpi=200,
+    bbox_inches="tight",
+)
+nettoa_fig.savefig(
+    outdir / current_dir / results / "pdf" / f"4xCO2_all_models_NETTOA_timeseries_{scale}.pdf",
+    bbox_inches="tight",
+)
+plt.close(nettoa_fig)
+
+if results == "unblinded":
+    assmpt_fig.savefig(
+        outdir / current_dir / results / "png" / f"4xCO2_all_models_cdTdt_t_{results}.png",
+        dpi=200,
+        bbox_inches="tight",
+    )
+    assmpt_fig.savefig(
+        outdir / current_dir / results / "pdf" / f"4xCO2_all_models_cdTdt_t_{results}.pdf",
+        bbox_inches="tight",
+    )
+    plt.close(assmpt_fig)
+
+    if sc_for_cbar is not None:
+        cbar = ohct_fig.colorbar(sc_for_cbar, ax=ohct_axs.ravel().tolist(), fraction=0.025, pad=0.025)
+        cbar.set_label("Year")
+
+    ohct_fig.savefig(
+        outdir / current_dir / results / "png" / "4xCO2_all_models_ohc_ts.png",
+        dpi=200,
+        bbox_inches="tight",
+    )
+    ohct_fig.savefig(
+        outdir / current_dir / results / "pdf" / "4xCO2_all_models_ohc_ts.pdf",
+        bbox_inches="tight",
+    )
+    plt.close(ohct_fig)
+
+print("Finished final val/result plots")
 print("Done.")
 print(f"Final parameter table: {outdir / current_dir / 'tables' / 'params_final.csv'}")
+print(f"2013a-compatible parameter table: {outdir / current_dir / 'fitted_model_params.csv'}")
