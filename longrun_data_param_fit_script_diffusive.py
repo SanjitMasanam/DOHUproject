@@ -304,8 +304,11 @@ for run_type in [3, 1]:
                   T_eq = df.loc[df["model"] == model, "T_eq"].iloc[0]
                   T_eq_unc = df.loc[df["model"] == model, "T_eq_unc"].iloc[0]
 
-                  def fit_func(x, D):
+                  def fit_func_diff(x, D):
                      return 1-erfcx(x/D * (lmbda**2)/(((1025)*(3993))**2))
+
+                  def fit_func_ode(x, tau):
+                     return 1-np.exp(x/tau)
 
                   if results == "validation" and run_type == 1: 
                      fit_T = t2m[:151]/T_eq
@@ -329,11 +332,19 @@ for run_type in [3, 1]:
                      plot_t = np.arange(1, 1 + plot_T.shape[0], 1)
 
                   # Compute the fitted temperature curve & nettoa/OHC
-                  popt, pcov = curve_fit(fit_func, fit_t, fit_T, p0=[5*10**(-5)])
+                  popt, pcov = curve_fit(fit_func_diff, fit_t, fit_T, p0=[5*10**(-5)])
                   perr = np.sqrt(np.diag(pcov))
                   print(popt, perr)
 
                   D = popt[0]
+                  D_unc = perr[0]
+
+                  popt, pcov = curve_fit(fit_func_ode, fit_t, fit_T, p0=[5*10**(-5)])
+                  perr = np.sqrt(np.diag(pcov))
+                  print(popt, perr)
+
+                  tau = popt[0]
+                  tau_unc = perr[0]
                   
                   # # Plot OHC vs. T_s
                   # if results == 'unblinded':
@@ -367,7 +378,8 @@ for run_type in [3, 1]:
                   ax = final_axs[expt][final_idx[expt]]
                   ax.scatter(plot_t, T_eq*plot_T, s=4, color="red")
                   ax.plot(plot_t, T_eq*plot_T, color="red", label="2-m Surface Temp.")
-                  ax.plot(plot_t, T_eq*fit_func(plot_t, D), color="blue", label="Diffusive Fit")
+                  ax.plot(plot_t, T_eq*fit_func_diff(plot_t, D), color="blue", label="Diffusive Fit")
+                  ax.plot(plot_t, T_eq*fit_func_ode(plot_t, tau), color="blue", label="ODE Fit")
 
                   # Add the slow-timescale parameter and a reference line at 150 years.
                   ax.text(
