@@ -59,7 +59,7 @@ REPLICATE_LATE_YEAR_END = 150
 EARLY_YEAR_START = 1
 EARLY_YEAR_END = 10
 
-for run_type in [3, 2, 1]:
+for run_type in [1, 2, 3]:
    for results in ["unblinded", "validation"]:
       for lin in [True, False]:
          dir_list = [
@@ -1106,7 +1106,7 @@ for run_type in [3, 2, 1]:
                     F_ref - lmbda * T_obs_roll - (epsilon - 1.0) * H_fit_roll,
                     label=r"$F-\lambda T-(\epsilon-1)H$",
                 )
-                
+
             if results == "unblinded":
                 ax.plot(t, N_fit, label="EBM-ε fit")
             
