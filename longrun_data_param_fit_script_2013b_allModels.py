@@ -45,6 +45,9 @@ CONVERGENCE_RTOL = 1.0e-4
 # If True, saves Step 1 and Step 2 diagnostic figures for each iteration.
 SAVE_ITERATION_PLOTS = True
 
+# If non-zero, print per-iteration progress/diagnostics from the calibration loop.
+VERBOSE = 0
+
 # If your R data are already anomalies, set this to False.
 SUBTRACT_PICONTROL_BASELINE = True
 
@@ -61,1116 +64,1208 @@ EARLY_YEAR_END = 10
 
 for run_type in [1, 2, 3]:
    for results in ["unblinded", "validation"]:
-      for lin in [True, False]:
-         dir_list = [
-            "geoffroy_replicate_results",
-            "50-yr_avg_forcing_results",
-            "50-yr_avg_tau_s_LR_fit_results",
-         ]
-         current_dir = dir_list[run_type - 1]
-
-         print("==================================")
-         print(f"Current Dir: {current_dir}\nType of output: {results}\nLinear Scale: {lin}")
-         print("==================================")
-
-
-         # ------------------------- Data structures -------------------------
-
-         PARAM_COLS = [
-            "model",
-            "C",
-            "C0",
-            "gamma",
-            "C0_prime",
-            "gamma_prime",
-            "tau_f",
-            "tau_s",
-            "F_ref",
-            "lambda",
-            "T_eq",
-            "a_f",
-            "a_s",
-            "epsilon",
-            "C_unc",
-            "C0_unc",
-            "gamma_unc",
-            "C0_prime_unc",
-            "gamma_prime_unc",
-            "tau_f_unc",
-            "tau_s_unc",
-            "F_ref_unc",
-            "lambda_unc",
-            "T_eq_unc",
-            "a_f_unc",
-            "a_s_unc",
-            "epsilon_unc",
-         ]
-
-
-         @dataclass
-         class SeriesBundle:
-            t_full: np.ndarray
-            T_full: np.ndarray
-            N_full: np.ndarray
-            t_late: np.ndarray
-            T_late: np.ndarray
-            N_late: np.ndarray
-            t_early: np.ndarray
-            T_early: np.ndarray
-
-
-         # ------------------------- Helper functions -------------------------
-
-
-         def sympy_prop_unc(expr, values, uncertainties):
-            """First-order independent-variable uncertainty propagation."""
-            variance = 0.0
-            for sym, unc in uncertainties.items():
-               if unc is None or not np.isfinite(float(unc)):
-                     continue
-               deriv = sp.diff(expr, sym)
-               deriv_val = float(deriv.evalf(subs=values))
-               variance += (deriv_val * float(unc)) ** 2
-            return float(np.sqrt(max(variance, 0.0)))
-
-
-         def make_model_grid(models, width_per_ax=7, height_per_ax=5, dpi=None, ncols=4):
-            """Create a grid large enough for all models."""
-            nmodels = len(models)
-            nrows = int(np.ceil(nmodels / ncols))
-            fig, axs = plt.subplots(
-               nrows,
-               ncols,
-               figsize=(width_per_ax * ncols, height_per_ax * nrows),
-               dpi=dpi,
-               constrained_layout=True,
-            )
-            axs = np.asarray(axs).ravel()
-            for ax in axs[nmodels:]:
-               ax.set_visible(False)
-            return fig, axs
-
-
-         def ensure_dirs(outdir, current_dir, sections):
-            for section in sections:
-               (outdir / current_dir / section / "png").mkdir(parents=True, exist_ok=True)
-               (outdir / current_dir / section / "pdf").mkdir(parents=True, exist_ok=True)
-            (outdir / current_dir / "tables").mkdir(parents=True, exist_ok=True)
-
-
-         def as_1d_float(x):
-            return np.asarray(x, dtype=float).ravel()
-
-
-         def finite_pair_mask(*arrays):
-            mask = np.ones_like(arrays[0], dtype=bool)
-            for arr in arrays:
-               mask &= np.isfinite(arr)
-            return mask
-
-
-         def covariance_from_lstsq(X, y, coeffs):
-            """OLS coefficient covariance estimate sigma^2 (X'X)^-1."""
-            n, p = X.shape
-            resid = y - X @ coeffs
-            dof = max(n - p, 1)
-            sigma2 = float(np.sum(resid**2) / dof)
-            return sigma2 * np.linalg.pinv(X.T @ X)
-
-
-         def fit_gregory_initial(T_obs, N_obs):
-            """Initial EBM-1 / Gregory fit: N = F - lambda T."""
-            good = finite_pair_mask(T_obs, N_obs)
-            T_fit = T_obs[good]
-            N_fit = N_obs[good]
-
-            (m, b), cov = np.polyfit(T_fit, N_fit, 1, cov=True)
-            F_ref = float(b)
-            lmbda = float(-m)
-            epsilon = 1.0
-            T_eq = F_ref / lmbda
-
-            F_ref_unc = float(np.sqrt(max(cov[1, 1], 0.0)))
-            lambda_unc = float(np.sqrt(max(cov[0, 0], 0.0)))
-
-            sp_m, sp_b = sp.symbols("m b")
-            T_eq_unc = sympy_prop_unc(
-               sp_b / (-sp_m),
-               {sp_m: m, sp_b: b},
-               {sp_m: lambda_unc, sp_b: F_ref_unc},
-            )
-
-            return {
-               "F_ref": F_ref,
-               "lambda": lmbda,
-               "epsilon": epsilon,
-               "T_eq": T_eq,
-               "F_ref_unc": F_ref_unc,
-               "lambda_unc": lambda_unc,
-               "epsilon_unc": 0.0,
-               "T_eq_unc": T_eq_unc,
-            }
-
-
-         def T_model(t, T_eq, a_f, a_s, tau_f, tau_s):
-            """Step-forcing temperature response."""
-            t = np.asarray(t, dtype=float)
-            return T_eq * (1.0 - a_f * np.exp(-t / tau_f) - a_s * np.exp(-t / tau_s))
-
-
-         def dTdt_model(t, T_eq, a_f, a_s, tau_f, tau_s):
-            """Time derivative of the step-forcing temperature response."""
-            t = np.asarray(t, dtype=float)
-            return T_eq * (
-               (a_f / tau_f) * np.exp(-t / tau_f)
-               + (a_s / tau_s) * np.exp(-t / tau_s)
-            )
-
-
-         def H_physical_from_previous_solution(t, F_ref, lmbda, C, epsilon, T_eq, a_f, a_s, tau_f, tau_s):
-            """
-            Physical deep-ocean heat uptake H from the previous EBM solution.
-
-            In the primed EBM-1-equivalent system,
-               C dT/dt = F - lambda T - gamma_prime (T - T0).
-            Thus gamma_prime(T - T0) = F - lambda T - C dT/dt = epsilon H.
-            Eq. (3) in Geoffroy2013b uses physical H, so divide by epsilon.
-            """
-            Tm = T_model(t, T_eq, a_f, a_s, tau_f, tau_s)
-            dTm = dTdt_model(t, T_eq, a_f, a_s, tau_f, tau_s)
-            H_prime = F_ref - lmbda * Tm - C * dTm
-            return H_prime / epsilon
-
-
-         def fit_radiative_epsilon(T_obs, N_obs, H_prev):
-            """
-            Iterative EBM-epsilon radiative fit:
-               N = F - lambda*T - (epsilon - 1)*H_prev.
-            """
-            good = finite_pair_mask(T_obs, N_obs, H_prev)
-            T_fit = T_obs[good]
-            N_fit = N_obs[good]
-            H_fit = H_prev[good]
-
-            X = np.column_stack([np.ones_like(T_fit), -T_fit, -H_fit])
-            coeffs, *_ = np.linalg.lstsq(X, N_fit, rcond=None)
-            pcov = covariance_from_lstsq(X, N_fit, coeffs)
-
-            F_ref = float(coeffs[0])
-            lmbda = float(coeffs[1])
-            eps_minus_1 = float(coeffs[2])
-            epsilon = 1.0 + eps_minus_1
-            T_eq = F_ref / lmbda
-
-            F_ref_unc = float(np.sqrt(max(pcov[0, 0], 0.0)))
-            lambda_unc = float(np.sqrt(max(pcov[1, 1], 0.0)))
-            epsilon_unc = float(np.sqrt(max(pcov[2, 2], 0.0)))
-
-            sp_F, sp_lmbda = sp.symbols("F lambda")
-            T_eq_unc = sympy_prop_unc(
-               sp_F / sp_lmbda,
-               {sp_F: F_ref, sp_lmbda: lmbda},
-               {sp_F: F_ref_unc, sp_lmbda: lambda_unc},
-            )
-
-            return {
-               "F_ref": F_ref,
-               "lambda": lmbda,
-               "epsilon": epsilon,
-               "T_eq": T_eq,
-               "F_ref_unc": F_ref_unc,
-               "lambda_unc": lambda_unc,
-               "epsilon_unc": epsilon_unc,
-               "T_eq_unc": T_eq_unc,
-            }
-
-
-         def fit_slow_mode(t_late, T_late, T_eq):
-            """
-            Fit log(T_eq - T) - log(T_eq) = log(a_s) - t/tau_s.
-
-            Important: the intercept is log(a_s), not log(epsilon*a_s).
-            """
-            t_late = np.asarray(t_late, dtype=float)
-            T_late = np.asarray(T_late, dtype=float)
-            good = np.isfinite(t_late) & np.isfinite(T_late) & np.isfinite(T_eq) & ((T_eq - T_late) > 0) & (T_eq > 0)
-
-            if np.sum(good) < 3:
-               raise RuntimeError("Not enough valid late-time points for tau_s/a_s fit.")
-
-            x = t_late[good]
-            y = np.log(T_eq - T_late[good]) - np.log(T_eq)
-
-            (m, b), cov = np.polyfit(x, y, 1, cov=True)
-            tau_s = float(-1.0 / m)
-            a_s = float(np.exp(b))
-            a_f = float(1.0 - a_s)
-
-            m_unc = float(np.sqrt(max(cov[0, 0], 0.0)))
-            b_unc = float(np.sqrt(max(cov[1, 1], 0.0)))
-
-            sp_m, sp_b = sp.symbols("m b")
-            tau_s_unc = sympy_prop_unc(-1 / sp_m, {sp_m: m}, {sp_m: m_unc})
-            a_s_unc = sympy_prop_unc(sp.exp(sp_b), {sp_b: b}, {sp_b: b_unc})
-            a_f_unc = a_s_unc
-
-            return {
-               "tau_s": tau_s,
-               "a_s": a_s,
-               "a_f": a_f,
-               "tau_s_unc": tau_s_unc,
-               "a_s_unc": a_s_unc,
-               "a_f_unc": a_f_unc,
-               "m": float(m),
-               "b": float(b),
-               "m_unc": m_unc,
-               "b_unc": b_unc,
-               "x": x,
-               "y": y,
-               "yfit": m * x + b,
-            }
-
-
-         # Paper-faithful tau_f estimate:
-         # compute Eq. (18) year-by-year over years 1--10, then average.
-         def fit_fast_mode(t_early, T_early, T_eq, a_f, a_s, tau_s):
-            """
-            Geoffroy2013a Eq. (18) tau_f estimate.
-
-            The paper does not fit tau_f by nonlinear least squares.
-            It computes tau_f(t) from Eq. (18) for each of the first
-            10 years and then averages those values.
-            """
-            t_early = np.asarray(t_early, dtype=float)
-            T_early = np.asarray(T_early, dtype=float)
-
-            z = 1.0 - T_early / T_eq - a_s * np.exp(-t_early / tau_s)
-
-            good = (
-               np.isfinite(t_early)
-               & np.isfinite(T_early)
-               & np.isfinite(z)
-               & (z > 0.0)
-               & np.isfinite(T_eq)
-               & (T_eq > 0.0)
-               & np.isfinite(a_f)
-               & (a_f > 0.0)
-               & np.isfinite(tau_s)
-               & (tau_s > 0.0)
-            )
-
-            if np.sum(good) < 2:
-               return np.nan, np.nan
-
-            denom = np.log(a_f) - np.log(z[good])
-            tau_vals = t_early[good] / denom
-
-            tau_vals = tau_vals[np.isfinite(tau_vals) & (tau_vals > 0.0)]
-
-            if len(tau_vals) == 0:
-               return np.nan, np.nan
-
-            tau_f = float(np.mean(tau_vals))
-
-            # The paper does not define tau_f uncertainty.
-            # This is just the scatter of the 1-10 yr implied values.
-            tau_f_unc = float(np.std(tau_vals, ddof=1)) if len(tau_vals) > 1 else np.nan
-
-            return tau_f, tau_f_unc
-
-
-
-         def thermal_params_from_modes(lmbda, a_f, a_s, tau_f, tau_s, epsilon):
-            """
-            Convert mode parameters to EBM-epsilon physical parameters.
-
-            The mode inversion gives C0_prime and gamma_prime.  Geoffroy2013b uses
-               C0_prime = epsilon*C0 and gamma_prime = epsilon*gamma,
-            so the physical C0 and gamma are obtained by dividing by epsilon.
-            """
-            C = lmbda / (a_f / tau_f + a_s / tau_s)
-            C0_prime = lmbda * (a_f * tau_f + a_s * tau_s) - C
-            gamma_prime = C0_prime / (tau_f * a_s + tau_s * a_f)
-
-            C0 = C0_prime / epsilon
-            gamma = gamma_prime / epsilon
-
-            return {
-               "C": float(C),
-               "C0": float(C0),
-               "gamma": float(gamma),
-               "C0_prime": float(C0_prime),
-               "gamma_prime": float(gamma_prime),
-            }
-
-
-         def thermal_uncertainties(lmbda, lambda_unc, a_s, a_s_unc, tau_s, tau_s_unc, tau_f, tau_f_unc, epsilon, epsilon_unc):
-            """First-order uncertainties for C, C0, gamma and primed versions."""
-            sp_lambda, sp_as, sp_taus, sp_tauf, sp_eps = sp.symbols("lambda a_s tau_s tau_f epsilon")
-            sp_af = 1 - sp_as
-
-            C_expr = sp_lambda / ((sp_af / sp_tauf) + (sp_as / sp_taus))
-            C0p_expr = sp_lambda * (sp_tauf * sp_af + sp_taus * sp_as) - C_expr
-            gammap_expr = C0p_expr / (sp_tauf * sp_as + sp_taus * sp_af)
-            C0_expr = C0p_expr / sp_eps
-            gamma_expr = gammap_expr / sp_eps
-
-            values = {
-               sp_lambda: lmbda,
-               sp_as: a_s,
-               sp_taus: tau_s,
-               sp_tauf: tau_f,
-               sp_eps: epsilon,
-            }
-            uncs = {
-               sp_lambda: lambda_unc,
-               sp_as: a_s_unc,
-               sp_taus: tau_s_unc,
-               sp_tauf: tau_f_unc,
-               sp_eps: epsilon_unc,
-            }
-
-            return {
-               "C_unc": sympy_prop_unc(C_expr, values, uncs),
-               "C0_prime_unc": sympy_prop_unc(C0p_expr, values, uncs),
-               "gamma_prime_unc": sympy_prop_unc(gammap_expr, values, uncs),
-               "C0_unc": sympy_prop_unc(C0_expr, values, uncs),
-               "gamma_unc": sympy_prop_unc(gamma_expr, values, uncs),
-            }
-
-
-         def get_r_array(model_data, expt, var):
-            return as_1d_float(model_data.rx2(expt).rx2(var))
-
-
-         def select_years(arr, start_year, end_year=None):
-            """Select 1-indexed inclusive years from an array."""
-            if end_year is None:
-               return arr[start_year - 1 :]
-            return arr[start_year - 1 : end_year]
-
-
-         def make_series_bundle(model_data, expts):
-            """Read piControl and 4xCO2 series and return consistently baselined slices."""
-            if "piControl" not in expts or "4xCO2" not in expts:
-               raise RuntimeError(f"Expected expts to include 'piControl' and '4xCO2'; got {expts}")
-
-            T_ctrl_raw = get_r_array(model_data, "piControl", "T2M")
-            N_ctrl_raw = get_r_array(model_data, "piControl", "NETTOA")
-            T_4x_raw = get_r_array(model_data, "4xCO2", "T2M")
-            N_4x_raw = get_r_array(model_data, "4xCO2", "NETTOA")
-
-            if run_type == 1:
-               full_end = N_REPLICATE_YEARS
-               T_base_arr = select_years(T_ctrl_raw, 1, full_end)
-               N_base_arr = select_years(N_ctrl_raw, 1, full_end)
-               T_full_raw = select_years(T_4x_raw, 1, full_end)
-               N_full_raw = select_years(N_4x_raw, 1, full_end)
-               t_full = np.arange(1, full_end + 1, dtype=float)
-
-               T_late_raw = select_years(T_4x_raw, REPLICATE_LATE_YEAR_START, REPLICATE_LATE_YEAR_END)
-               N_late_raw = select_years(N_4x_raw, REPLICATE_LATE_YEAR_START, REPLICATE_LATE_YEAR_END)
-               t_late = np.arange(REPLICATE_LATE_YEAR_START, REPLICATE_LATE_YEAR_END + 1, dtype=float)
+      dir_list = [
+         "geoffroy_replicate_results",
+         "50-yr_avg_forcing_results",
+         "50-yr_avg_tau_s_LR_fit_results",
+      ]
+      current_dir = dir_list[run_type - 1]
+
+      print("==================================")
+      print(f"Current Dir: {current_dir}\nType of output: {results}")
+      print("==================================")
+
+
+      # ------------------------- Data structures -------------------------
+
+      PARAM_COLS = [
+         "model",
+         "C",
+         "C0",
+         "gamma",
+         "C0_prime",
+         "gamma_prime",
+         "tau_f",
+         "tau_s",
+         "F_ref",
+         "lambda",
+         "T_eq",
+         "a_f",
+         "a_s",
+         "epsilon",
+         "C_unc",
+         "C0_unc",
+         "gamma_unc",
+         "C0_prime_unc",
+         "gamma_prime_unc",
+         "tau_f_unc",
+         "tau_s_unc",
+         "F_ref_unc",
+         "lambda_unc",
+         "T_eq_unc",
+         "a_f_unc",
+         "a_s_unc",
+         "epsilon_unc",
+      ]
+
+
+      @dataclass
+      class SeriesBundle:
+         t_full: np.ndarray
+         T_full: np.ndarray
+         N_full: np.ndarray
+         t_late: np.ndarray
+         T_late: np.ndarray
+         N_late: np.ndarray
+         t_early: np.ndarray
+         T_early: np.ndarray
+
+
+      # ------------------------- Helper functions -------------------------
+
+
+      def sympy_prop_unc(expr, values, uncertainties):
+         """First-order independent-variable uncertainty propagation."""
+         variance = 0.0
+         for sym, unc in uncertainties.items():
+            if unc is None or not np.isfinite(float(unc)):
+                  continue
+            deriv = sp.diff(expr, sym)
+            deriv_val = float(deriv.evalf(subs=values))
+            variance += (deriv_val * float(unc)) ** 2
+         return float(np.sqrt(max(variance, 0.0)))
+
+
+      def format_ax(ax, title="", xlabel="", ylabel="", text="",
+                  xscale="linear", yscale="linear",
+                  xlim=None, ylim=None,
+                  xticks=None, yticks=None,
+                  xspacing=True, yspacing=True,
+                  legend=True, legend_loc='upper right', grid=True):
+
+         ax.set(title=title, xlabel=xlabel, ylabel=ylabel,
+               xscale=xscale, yscale=yscale,
+               xlim=xlim, ylim=ylim)
+
+         if text:
+            ax.text(0.02, 0.98, text, transform=ax.transAxes, weight='bold',
+                     fontsize=15, va="top", ha="left",
+                     bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4))
+
+         if xticks is not None: ax.set_xticks(xticks)
+         if yticks is not None: ax.set_yticks(yticks)
+
+         ax.tick_params(labelsize=14, width=2, length=8, direction="in")
+         if grid: ax.grid(alpha=0.3)
+         if legend: ax.legend(loc=legend_loc, prop={'weight': 'bold', 'size': 12})
+
+      def make_model_grid(
+         models,
+         width_per_ax=6,
+         height_per_ax=6,
+         dpi=None,
+         title=None,
+         xlabel=None,
+         ylabel=None,
+         ncols=4,
+         nrows=2,
+         right=0.98,
+         wspace=0.12,
+         hspace=0.18,
+      ):
+         nmodels = len(models)
+         if nmodels % 2 != 0:
+            raise ValueError(f"Expected an even number of models, got {nmodels}.")
+
+         ncols, nrows = 4, 2
+
+         fig, axs = plt.subplots(
+            nrows,
+            ncols,
+            figsize=(width_per_ax * ncols, height_per_ax * nrows),
+            dpi=dpi,
+            constrained_layout=False,
+         )
+
+         fig.subplots_adjust(left=0.05, right=right, bottom=0.075, top=0.95, wspace=wspace, hspace=hspace)
+
+         if title:
+            fig.suptitle(title, fontsize=20, fontweight="bold")
+
+         if xlabel:
+            fig.text(0.5, 0.02, xlabel, ha='center', fontsize=18, fontweight="bold")
+
+         if ylabel:
+            fig.text(0.02, 0.5, ylabel, ha='center', va='center', fontsize=18, fontweight="bold", rotation=90.)
+
+         return fig, np.asarray(axs).ravel()
+
+
+      def ensure_dirs(outdir, current_dir, sections):
+         for section in sections:
+            (outdir / current_dir / section / "png").mkdir(parents=True, exist_ok=True)
+            (outdir / current_dir / section / "pdf").mkdir(parents=True, exist_ok=True)
+         (outdir / current_dir / "tables").mkdir(parents=True, exist_ok=True)
+
+
+      def as_1d_float(x):
+         return np.asarray(x, dtype=float).ravel()
+
+
+      def finite_pair_mask(*arrays):
+         mask = np.ones_like(arrays[0], dtype=bool)
+         for arr in arrays:
+            mask &= np.isfinite(arr)
+         return mask
+
+
+      def covariance_from_lstsq(X, y, coeffs):
+         """OLS coefficient covariance estimate sigma^2 (X'X)^-1."""
+         n, p = X.shape
+         resid = y - X @ coeffs
+         dof = max(n - p, 1)
+         sigma2 = float(np.sum(resid**2) / dof)
+         return sigma2 * np.linalg.pinv(X.T @ X)
+
+
+      def fit_gregory_initial(T_obs, N_obs):
+         """Initial EBM-1 / Gregory fit: N = F - lambda T."""
+         good = finite_pair_mask(T_obs, N_obs)
+         T_fit = T_obs[good]
+         N_fit = N_obs[good]
+
+         (m, b), cov = np.polyfit(T_fit, N_fit, 1, cov=True)
+         F_ref = float(b)
+         lmbda = float(-m)
+         epsilon = 1.0
+         T_eq = F_ref / lmbda
+
+         F_ref_unc = float(np.sqrt(max(cov[1, 1], 0.0)))
+         lambda_unc = float(np.sqrt(max(cov[0, 0], 0.0)))
+
+         sp_m, sp_b = sp.symbols("m b")
+         T_eq_unc = sympy_prop_unc(
+            sp_b / (-sp_m),
+            {sp_m: m, sp_b: b},
+            {sp_m: lambda_unc, sp_b: F_ref_unc},
+         )
+
+         return {
+            "F_ref": F_ref,
+            "lambda": lmbda,
+            "epsilon": epsilon,
+            "T_eq": T_eq,
+            "F_ref_unc": F_ref_unc,
+            "lambda_unc": lambda_unc,
+            "epsilon_unc": 0.0,
+            "T_eq_unc": T_eq_unc,
+         }
+
+
+      def T_model(t, T_eq, a_f, a_s, tau_f, tau_s):
+         """Step-forcing temperature response."""
+         t = np.asarray(t, dtype=float)
+         return T_eq * (1.0 - a_f * np.exp(-t / tau_f) - a_s * np.exp(-t / tau_s))
+
+
+      def dTdt_model(t, T_eq, a_f, a_s, tau_f, tau_s):
+         """Time derivative of the step-forcing temperature response."""
+         t = np.asarray(t, dtype=float)
+         return T_eq * (
+            (a_f / tau_f) * np.exp(-t / tau_f)
+            + (a_s / tau_s) * np.exp(-t / tau_s)
+         )
+
+
+      def H_physical_from_previous_solution(t, F_ref, lmbda, C, epsilon, T_eq, a_f, a_s, tau_f, tau_s):
+         """
+         Physical deep-ocean heat uptake H from the previous EBM solution.
+
+         In the primed EBM-1-equivalent system,
+            C dT/dt = F - lambda T - gamma_prime (T - T0).
+         Thus gamma_prime(T - T0) = F - lambda T - C dT/dt = epsilon H.
+         Eq. (3) in Geoffroy2013b uses physical H, so divide by epsilon.
+         """
+         Tm = T_model(t, T_eq, a_f, a_s, tau_f, tau_s)
+         dTm = dTdt_model(t, T_eq, a_f, a_s, tau_f, tau_s)
+         H_prime = F_ref - lmbda * Tm - C * dTm
+         return H_prime / epsilon
+
+
+      def fit_radiative_epsilon(T_obs, N_obs, H_prev):
+         """
+         Iterative EBM-epsilon radiative fit:
+            N = F - lambda*T - (epsilon - 1)*H_prev.
+         """
+         good = finite_pair_mask(T_obs, N_obs, H_prev)
+         T_fit = T_obs[good]
+         N_fit = N_obs[good]
+         H_fit = H_prev[good]
+
+         X = np.column_stack([np.ones_like(T_fit), -T_fit, -H_fit])
+         coeffs, *_ = np.linalg.lstsq(X, N_fit, rcond=None)
+         pcov = covariance_from_lstsq(X, N_fit, coeffs)
+
+         F_ref = float(coeffs[0])
+         lmbda = float(coeffs[1])
+         eps_minus_1 = float(coeffs[2])
+         epsilon = 1.0 + eps_minus_1
+         T_eq = F_ref / lmbda
+
+         F_ref_unc = float(np.sqrt(max(pcov[0, 0], 0.0)))
+         lambda_unc = float(np.sqrt(max(pcov[1, 1], 0.0)))
+         epsilon_unc = float(np.sqrt(max(pcov[2, 2], 0.0)))
+
+         sp_F, sp_lmbda = sp.symbols("F lambda")
+         T_eq_unc = sympy_prop_unc(
+            sp_F / sp_lmbda,
+            {sp_F: F_ref, sp_lmbda: lmbda},
+            {sp_F: F_ref_unc, sp_lmbda: lambda_unc},
+         )
+
+         return {
+            "F_ref": F_ref,
+            "lambda": lmbda,
+            "epsilon": epsilon,
+            "T_eq": T_eq,
+            "F_ref_unc": F_ref_unc,
+            "lambda_unc": lambda_unc,
+            "epsilon_unc": epsilon_unc,
+            "T_eq_unc": T_eq_unc,
+         }
+
+
+      def fit_slow_mode(t_late, T_late, T_eq):
+         """
+         Fit log(T_eq - T) - log(T_eq) = log(a_s) - t/tau_s.
+
+         Important: the intercept is log(a_s), not log(epsilon*a_s).
+         """
+         t_late = np.asarray(t_late, dtype=float)
+         T_late = np.asarray(T_late, dtype=float)
+         good = np.isfinite(t_late) & np.isfinite(T_late) & np.isfinite(T_eq) & ((T_eq - T_late) > 0) & (T_eq > 0)
+
+         if np.sum(good) < 3:
+            raise RuntimeError("Not enough valid late-time points for tau_s/a_s fit.")
+
+         x = t_late[good]
+         y = np.log(T_eq - T_late[good]) - np.log(T_eq)
+
+         (m, b), cov = np.polyfit(x, y, 1, cov=True)
+         tau_s = float(-1.0 / m)
+         a_s = float(np.exp(b))
+         a_f = float(1.0 - a_s)
+
+         m_unc = float(np.sqrt(max(cov[0, 0], 0.0)))
+         b_unc = float(np.sqrt(max(cov[1, 1], 0.0)))
+
+         sp_m, sp_b = sp.symbols("m b")
+         tau_s_unc = sympy_prop_unc(-1 / sp_m, {sp_m: m}, {sp_m: m_unc})
+         a_s_unc = sympy_prop_unc(sp.exp(sp_b), {sp_b: b}, {sp_b: b_unc})
+         a_f_unc = a_s_unc
+
+         return {
+            "tau_s": tau_s,
+            "a_s": a_s,
+            "a_f": a_f,
+            "tau_s_unc": tau_s_unc,
+            "a_s_unc": a_s_unc,
+            "a_f_unc": a_f_unc,
+            "m": float(m),
+            "b": float(b),
+            "m_unc": m_unc,
+            "b_unc": b_unc,
+            "x": x,
+            "y": y,
+            "yfit": m * x + b,
+         }
+
+
+      # Paper-faithful tau_f estimate:
+      # compute Eq. (18) year-by-year over years 1--10, then average.
+      def fit_fast_mode(t_early, T_early, T_eq, a_f, a_s, tau_s):
+         """
+         Geoffroy2013a Eq. (18) tau_f estimate.
+
+         The paper does not fit tau_f by nonlinear least squares.
+         It computes tau_f(t) from Eq. (18) for each of the first
+         10 years and then averages those values.
+         """
+         t_early = np.asarray(t_early, dtype=float)
+         T_early = np.asarray(T_early, dtype=float)
+
+         z = 1.0 - T_early / T_eq - a_s * np.exp(-t_early / tau_s)
+
+         good = (
+            np.isfinite(t_early)
+            & np.isfinite(T_early)
+            & np.isfinite(z)
+            & (z > 0.0)
+            & np.isfinite(T_eq)
+            & (T_eq > 0.0)
+            & np.isfinite(a_f)
+            & (a_f > 0.0)
+            & np.isfinite(tau_s)
+            & (tau_s > 0.0)
+         )
+
+         if np.sum(good) < 2:
+            return np.nan, np.nan
+
+         denom = np.log(a_f) - np.log(z[good])
+         tau_vals = t_early[good] / denom
+
+         tau_vals = tau_vals[np.isfinite(tau_vals) & (tau_vals > 0.0)]
+
+         if len(tau_vals) == 0:
+            return np.nan, np.nan
+
+         tau_f = float(np.mean(tau_vals))
+
+         # The paper does not define tau_f uncertainty.
+         # This is just the scatter of the 1-10 yr implied values.
+         tau_f_unc = float(np.std(tau_vals, ddof=1)) if len(tau_vals) > 1 else np.nan
+
+         return tau_f, tau_f_unc
+
+
+
+      def thermal_params_from_modes(lmbda, a_f, a_s, tau_f, tau_s, epsilon):
+         """
+         Convert mode parameters to EBM-epsilon physical parameters.
+
+         The mode inversion gives C0_prime and gamma_prime.  Geoffroy2013b uses
+            C0_prime = epsilon*C0 and gamma_prime = epsilon*gamma,
+         so the physical C0 and gamma are obtained by dividing by epsilon.
+         """
+         C = lmbda / (a_f / tau_f + a_s / tau_s)
+         C0_prime = lmbda * (a_f * tau_f + a_s * tau_s) - C
+         gamma_prime = C0_prime / (tau_f * a_s + tau_s * a_f)
+
+         C0 = C0_prime / epsilon
+         gamma = gamma_prime / epsilon
+
+         return {
+            "C": float(C),
+            "C0": float(C0),
+            "gamma": float(gamma),
+            "C0_prime": float(C0_prime),
+            "gamma_prime": float(gamma_prime),
+         }
+
+
+      def thermal_uncertainties(lmbda, lambda_unc, a_s, a_s_unc, tau_s, tau_s_unc, tau_f, tau_f_unc, epsilon, epsilon_unc):
+         """First-order uncertainties for C, C0, gamma and primed versions."""
+         sp_lambda, sp_as, sp_taus, sp_tauf, sp_eps = sp.symbols("lambda a_s tau_s tau_f epsilon")
+         sp_af = 1 - sp_as
+
+         C_expr = sp_lambda / ((sp_af / sp_tauf) + (sp_as / sp_taus))
+         C0p_expr = sp_lambda * (sp_tauf * sp_af + sp_taus * sp_as) - C_expr
+         gammap_expr = C0p_expr / (sp_tauf * sp_as + sp_taus * sp_af)
+         C0_expr = C0p_expr / sp_eps
+         gamma_expr = gammap_expr / sp_eps
+
+         values = {
+            sp_lambda: lmbda,
+            sp_as: a_s,
+            sp_taus: tau_s,
+            sp_tauf: tau_f,
+            sp_eps: epsilon,
+         }
+         uncs = {
+            sp_lambda: lambda_unc,
+            sp_as: a_s_unc,
+            sp_taus: tau_s_unc,
+            sp_tauf: tau_f_unc,
+            sp_eps: epsilon_unc,
+         }
+
+         return {
+            "C_unc": sympy_prop_unc(C_expr, values, uncs),
+            "C0_prime_unc": sympy_prop_unc(C0p_expr, values, uncs),
+            "gamma_prime_unc": sympy_prop_unc(gammap_expr, values, uncs),
+            "C0_unc": sympy_prop_unc(C0_expr, values, uncs),
+            "gamma_unc": sympy_prop_unc(gamma_expr, values, uncs),
+         }
+
+
+      def get_r_array(model_data, expt, var):
+         return as_1d_float(model_data.rx2(expt).rx2(var))
+
+
+      def select_years(arr, start_year, end_year=None):
+         """Select 1-indexed inclusive years from an array."""
+         if end_year is None:
+            return arr[start_year - 1 :]
+         return arr[start_year - 1 : end_year]
+
+
+      def make_series_bundle(model_data, expts):
+         """Read piControl and 4xCO2 series and return consistently baselined slices."""
+         if "piControl" not in expts or "4xCO2" not in expts:
+            raise RuntimeError(f"Expected expts to include 'piControl' and '4xCO2'; got {expts}")
+
+         T_ctrl_raw = get_r_array(model_data, "piControl", "T2M")
+         N_ctrl_raw = get_r_array(model_data, "piControl", "NETTOA")
+         T_4x_raw = get_r_array(model_data, "4xCO2", "T2M")
+         N_4x_raw = get_r_array(model_data, "4xCO2", "NETTOA")
+
+         if run_type == 1:
+            full_end = N_REPLICATE_YEARS
+            T_base_arr = select_years(T_ctrl_raw, 1, full_end)
+            N_base_arr = select_years(N_ctrl_raw, 1, full_end)
+            T_full_raw = select_years(T_4x_raw, 1, full_end)
+            N_full_raw = select_years(N_4x_raw, 1, full_end)
+            t_full = np.arange(1, full_end + 1, dtype=float)
+
+            T_late_raw = select_years(T_4x_raw, REPLICATE_LATE_YEAR_START, REPLICATE_LATE_YEAR_END)
+            N_late_raw = select_years(N_4x_raw, REPLICATE_LATE_YEAR_START, REPLICATE_LATE_YEAR_END)
+            t_late = np.arange(REPLICATE_LATE_YEAR_START, REPLICATE_LATE_YEAR_END + 1, dtype=float)
+         else:
+            # For non-replication cases, keep the original broad behavior but still use
+            # a consistent baseline.
+            T_base_arr = T_ctrl_raw
+            N_base_arr = N_ctrl_raw
+            T_full_raw = T_4x_raw
+            N_full_raw = N_4x_raw
+            t_full = np.arange(1, len(T_full_raw) + 1, dtype=float)
+
+            if run_type == 3:
+                  start = 50
             else:
-               # For non-replication cases, keep the original broad behavior but still use
-               # a consistent baseline.
-               T_base_arr = T_ctrl_raw
-               N_base_arr = N_ctrl_raw
-               T_full_raw = T_4x_raw
-               N_full_raw = N_4x_raw
-               t_full = np.arange(1, len(T_full_raw) + 1, dtype=float)
+                  start = REPLICATE_LATE_YEAR_START
+            T_late_raw = select_years(T_4x_raw, start, None)
+            N_late_raw = select_years(N_4x_raw, start, None)
+            t_late = np.arange(start, start + len(T_late_raw), dtype=float)
 
-               if run_type == 3:
-                     start = 50
-               else:
-                     start = REPLICATE_LATE_YEAR_START
-               T_late_raw = select_years(T_4x_raw, start, None)
-               N_late_raw = select_years(N_4x_raw, start, None)
-               t_late = np.arange(start, start + len(T_late_raw), dtype=float)
+         T_early_raw = select_years(T_4x_raw, EARLY_YEAR_START, EARLY_YEAR_END)
+         t_early = np.arange(EARLY_YEAR_START, EARLY_YEAR_END + 1, dtype=float)
 
-            T_early_raw = select_years(T_4x_raw, EARLY_YEAR_START, EARLY_YEAR_END)
-            t_early = np.arange(EARLY_YEAR_START, EARLY_YEAR_END + 1, dtype=float)
+         if SUBTRACT_PICONTROL_BASELINE:
+            T_base = float(np.nanmean(T_base_arr))
+            N_base = float(np.nanmean(N_base_arr))
+         else:
+            T_base = 0.0
+            N_base = 0.0
 
-            if SUBTRACT_PICONTROL_BASELINE:
-               T_base = float(np.nanmean(T_base_arr))
-               N_base = float(np.nanmean(N_base_arr))
-            else:
-               T_base = 0.0
-               N_base = 0.0
+         T_full = T_full_raw - T_base
+         N_full = N_full_raw - N_base
+         T_late = T_late_raw - T_base
+         N_late = N_late_raw - N_base
+         T_early = T_early_raw - T_base
 
-            T_full = T_full_raw - T_base
-            N_full = N_full_raw - N_base
-            T_late = T_late_raw - T_base
-            N_late = N_late_raw - N_base
-            T_early = T_early_raw - T_base
+         # Apply finite masks while preserving matching time coordinates.
+         m_full = finite_pair_mask(t_full, T_full, N_full)
+         m_late = finite_pair_mask(t_late, T_late, N_late)
+         m_early = finite_pair_mask(t_early, T_early)
 
-            # Apply finite masks while preserving matching time coordinates.
-            m_full = finite_pair_mask(t_full, T_full, N_full)
-            m_late = finite_pair_mask(t_late, T_late, N_late)
-            m_early = finite_pair_mask(t_early, T_early)
-
-            return SeriesBundle(
-               t_full=t_full[m_full],
-               T_full=T_full[m_full],
-               N_full=N_full[m_full],
-               t_late=t_late[m_late],
-               T_late=T_late[m_late],
-               N_late=N_late[m_late],
-               t_early=t_early[m_early],
-               T_early=T_early[m_early],
-            )
+         return SeriesBundle(
+            t_full=t_full[m_full],
+            T_full=T_full[m_full],
+            N_full=N_full[m_full],
+            t_late=t_late[m_late],
+            T_late=T_late[m_late],
+            N_late=N_late[m_late],
+            t_early=t_early[m_early],
+            T_early=T_early[m_early],
+         )
 
 
-         def numeric_params_for_convergence(df):
-            cols = ["F_ref", "lambda", "epsilon", "T_eq", "tau_f", "tau_s", "C", "C0", "gamma"]
-            return df[cols].apply(pd.to_numeric, errors="coerce")
+      def numeric_params_for_convergence(df):
+         cols = ["F_ref", "lambda", "epsilon", "T_eq", "tau_f", "tau_s", "C", "C0", "gamma"]
+         return df[cols].apply(pd.to_numeric, errors="coerce")
 
 
-         def update_row(df, model, values):
-            for key, val in values.items():
-               if key in df.columns:
-                     df.loc[df["model"] == model, key] = val
+      def update_row(df, model, values):
+         for key, val in values.items():
+            if key in df.columns:
+                  df.loc[df["model"] == model, key] = val
 
 
-         def plot_radiative_fit(ax, bundle, fit_params, H_prev, model, iteration):
-            T = bundle.T_full
-            N = bundle.N_full
-            t = bundle.t_full
-            F_ref = fit_params["F_ref"]
-            lmbda = fit_params["lambda"]
-            epsilon = fit_params["epsilon"]
+      def plot_radiative_fit(ax, bundle, fit_params, H_prev, model, iteration):
+         T = bundle.T_full
+         N = bundle.N_full
+         t = bundle.t_full
+         F_ref = fit_params["F_ref"]
+         lmbda = fit_params["lambda"]
+         epsilon = fit_params["epsilon"]
 
-            ax.scatter(T, N, s=8, alpha=0.5, label="AOGCM")
+         ax.scatter(T, N, s=8, alpha=0.5, label="AOGCM")
 
-            order = np.argsort(T)
-            if H_prev is None:
-               yfit = F_ref - lmbda * T[order]
-               label = f"Gregory: F={F_ref:.3g}, λ={lmbda:.3g}"
-            else:
-               yfit_all = F_ref - lmbda * T - (epsilon - 1.0) * H_prev
-               yfit = yfit_all[order]
-               label = f"EBM-ε: F={F_ref:.3g}, λ={lmbda:.3g}, ε={epsilon:.3g}"
+         order = np.argsort(T)
+         if H_prev is None:
+            yfit = F_ref - lmbda * T[order]
+            label = f"Gregory: F={F_ref:.3g}, λ={lmbda:.3g}"
+         else:
+            yfit_all = F_ref - lmbda * T - (epsilon - 1.0) * H_prev
+            yfit = yfit_all[order]
+            label = f"EBM-ε: F={F_ref:.3g}, λ={lmbda:.3g}, ε={epsilon:.3g}"
 
-            ax.plot(T[order], yfit, linewidth=2, label=label)
-            ax.set_xlabel("2-meter air temperature anomaly (K)")
-            ax.set_ylabel(r"Net TOA radiative flux anomaly (W m$^{-2}$)")
-            ax.set_title(f"{model}: radiative fit, iter {iteration + 1}")
-            ax.grid(True)
-            ax.legend(fontsize=8)
+         ax.plot(T[order], yfit, linewidth=2, label=label)
+         format_ax(ax, text=model, xscale="linear", yscale="linear")
 
 
-         def plot_slow_fit(ax, slow, model, iteration):
-            ax.scatter(slow["x"], slow["y"], s=8, alpha=0.5, label="AOGCM")
-            ax.plot(slow["x"], slow["yfit"], linewidth=2, label=f"τs={slow['tau_s']:.3g}, as={slow['a_s']:.3g}")
-            ax.set_xlabel("Time (years)")
-            ax.set_ylabel(r"log($T_{eq}$ - T) - log($T_{eq}$)")
-            ax.set_title(f"{model}: slow mode, iter {iteration + 1}")
-            ax.grid(True)
-            ax.legend(fontsize=8)
+      def plot_slow_fit(ax, slow, model, iteration):
+         ax.scatter(slow["x"], slow["y"], s=8, alpha=0.5, label="AOGCM")
+         ax.plot(slow["x"], slow["yfit"], linewidth=2, label=f"τs={slow['tau_s']:.3g}, as={slow['a_s']:.3g}")
+         format_ax(ax, text=model, xscale="linear", yscale="linear", legend_loc='lower left')
 
 
-         # ------------------------- Load R data -------------------------
+      # ------------------------- Load R data -------------------------
 
-         rdata_file = Path("./data/int_netToa_longrun.Rdata")
-         ro.r["load"](str(rdata_file))
+      rdata_file = Path("./data/int_netToa_longrun.Rdata")
+      ro.r["load"](str(rdata_file))
 
-         data = ro.globalenv["int_nettoa_longrun_data"]
-         models = list(ro.globalenv["models"])
-         expts = list(ro.globalenv["expts"])
+      data = ro.globalenv["int_nettoa_longrun_data"]
+      models = list(ro.globalenv["models"])
+      expts = list(ro.globalenv["expts"])
 
-         # Convert R strings to plain Python strings if needed.
-         models = ['CCSM3', 'CESM1', 'CNRMCM6', 'ECHAM5', 'GISSE2R', 'IPSLCM5A', 'HadGEM2', 'MPIESM11']
-         expts = [str(x) for x in expts]
+      # Convert R strings to plain Python strings if needed.
+      models = ['CCSM3', 'CESM1', 'CNRMCM6', 'ECHAM5', 'GISSE2R', 'IPSLCM5A', 'HadGEM2', 'MPIESM11']
+      expts = [str(x) for x in expts]
 
-         df = pd.DataFrame(columns=PARAM_COLS)
-         df["model"] = models
+      df = pd.DataFrame(columns=PARAM_COLS)
+      df["model"] = models
 
-         outdir = Path("./2013b_figures")
-         outdir.mkdir(exist_ok=True)
-         ensure_dirs(outdir, current_dir, ["step1", "step2", "validation", "unblinded"])
+      outdir = Path("./2013b_figures")
+      outdir.mkdir(exist_ok=True)
+      ensure_dirs(outdir, current_dir, ["step1", "step2", "validation", "unblinded"])
 
-         # Cache all model series so every step uses identical baselines and slices.
-         series_by_model: Dict[str, SeriesBundle] = {}
-         for model in models:
-            series_by_model[model] = make_series_bundle(data.rx2(model), expts)
+      # Cache all model series so every step uses identical baselines and slices.
+      series_by_model: Dict[str, SeriesBundle] = {}
+      for model in models:
+         series_by_model[model] = make_series_bundle(data.rx2(model), expts)
 
 
-         # ------------------------- Iterative calibration -------------------------
+      # ------------------------- Iterative calibration -------------------------
 
-         converged = False
-         last_iteration = 0
+      converged = False
+      last_iteration = 0
 
-         for iteration in range(MAX_ITERATIONS):
+      for iteration in range(MAX_ITERATIONS):
+         if VERBOSE:
             print(f"\n================ ITERATION {iteration + 1} ================")
-            old_params = numeric_params_for_convergence(df).copy()
+         old_params = numeric_params_for_convergence(df).copy()
 
-            # Create diagnostic figures for this iteration.
-            step1_fig, step1_axs = make_model_grid(models, width_per_ax=7, height_per_ax=5)
-            step2_fig, step2_axs = make_model_grid(models, width_per_ax=7, height_per_ax=5)
+         # Create diagnostic figures for this iteration.
+         step1_fig, step1_axs = make_model_grid(
+            models,
+            title=rf"4xCO$_2$ Net TOA vs T$_{{2M}}$ (radiative fit, iter {iteration + 1})",
+            xlabel="2-meter Air Temperature Anomaly (K)",
+            ylabel=r"Net TOA Radiative Flux Anomaly ($W\,m^{-2}$)",
+         )
+         step2_fig, step2_axs = make_model_grid(
+            models,
+            title=rf"4xCO$_2$ log(T$_{{eq}}$-T) - log(T$_{{eq}}$) vs. Time (slow mode, iter {iteration + 1})",
+            xlabel="Time (years)",
+            ylabel=r"log($T_{eq}$-T)-log($T_{eq}$)",
+         )
 
-            # ----------------- STEP 1: F, lambda, epsilon -----------------
-            for imodel, model in enumerate(models):
-               bundle = series_by_model[model]
+         # ----------------- STEP 1: F, lambda, epsilon -----------------
+         for imodel, model in enumerate(models):
+            bundle = series_by_model[model]
 
-               if iteration == 0:
-                     fit = fit_gregory_initial(bundle.T_full, bundle.N_full)
-                     H_prev = None
-               else:
-                     prev = df.loc[df["model"] == model].iloc[0]
-                     H_prev = H_physical_from_previous_solution(
-                        bundle.t_full,
-                        F_ref=float(prev["F_ref"]),
-                        lmbda=float(prev["lambda"]),
-                        C=float(prev["C"]),
-                        epsilon=float(prev["epsilon"]),
-                        T_eq=float(prev["T_eq"]),
-                        a_f=float(prev["a_f"]),
-                        a_s=float(prev["a_s"]),
-                        tau_f=float(prev["tau_f"]),
-                        tau_s=float(prev["tau_s"]),
-                     )
-                     fit = fit_radiative_epsilon(bundle.T_full, bundle.N_full, H_prev)
+            if iteration == 0:
+                  fit = fit_gregory_initial(bundle.T_full, bundle.N_full)
+                  H_prev = None
+            else:
+                  prev = df.loc[df["model"] == model].iloc[0]
+                  H_prev = H_physical_from_previous_solution(
+                     bundle.t_full,
+                     F_ref=float(prev["F_ref"]),
+                     lmbda=float(prev["lambda"]),
+                     C=float(prev["C"]),
+                     epsilon=float(prev["epsilon"]),
+                     T_eq=float(prev["T_eq"]),
+                     a_f=float(prev["a_f"]),
+                     a_s=float(prev["a_s"]),
+                     tau_f=float(prev["tau_f"]),
+                     tau_s=float(prev["tau_s"]),
+                  )
+                  fit = fit_radiative_epsilon(bundle.T_full, bundle.N_full, H_prev)
 
-               update_row(df, model, fit)
-               plot_radiative_fit(step1_axs[imodel], bundle, fit, H_prev, model, iteration)
+            update_row(df, model, fit)
+            plot_radiative_fit(step1_axs[imodel], bundle, fit, H_prev, model, iteration)
 
-            if SAVE_ITERATION_PLOTS:
-               suffix = f"iter{iteration + 1:02d}"
-               step1_fig.savefig(
-                     outdir / current_dir / "step1" / "png" / f"4xCO2_all_models_T2M_vs_NETTOA_{suffix}.png",
-                     dpi=200,
-                     bbox_inches="tight",
-               )
-               step1_fig.savefig(
-                     outdir / current_dir / "step1" / "pdf" / f"4xCO2_all_models_T2M_vs_NETTOA_{suffix}.pdf",
-                     bbox_inches="tight",
-               )
-            plt.close(step1_fig)
+         if SAVE_ITERATION_PLOTS:
+            suffix = f"iter{iteration + 1:02d}"
+            step1_fig.savefig(
+                  outdir / current_dir / "step1" / "png" / f"4xCO2_all_models_T2M_vs_NETTOA_{suffix}.png",
+                  dpi=200,
+                  bbox_inches="tight",
+            )
+            step1_fig.savefig(
+                  outdir / current_dir / "step1" / "pdf" / f"4xCO2_all_models_T2M_vs_NETTOA_{suffix}.pdf",
+                  bbox_inches="tight",
+            )
+         plt.close(step1_fig)
 
+         if VERBOSE:
             print("Finished Step 1: F_ref, lambda, epsilon, T_eq updated")
 
-            # ----------------- STEP 2: tau_s, a_s, tau_f, C, C0, gamma -----------------
-            for imodel, model in enumerate(models):
-               bundle = series_by_model[model]
-               row = df.loc[df["model"] == model].iloc[0]
+         # ----------------- STEP 2: tau_s, a_s, tau_f, C, C0, gamma -----------------
+         for imodel, model in enumerate(models):
+            bundle = series_by_model[model]
+            row = df.loc[df["model"] == model].iloc[0]
 
-               F_ref = float(row["F_ref"])
-               lmbda = float(row["lambda"])
-               lambda_unc = float(row["lambda_unc"])
-               T_eq = float(row["T_eq"])
-               epsilon = float(row["epsilon"])
-               epsilon_unc = float(row["epsilon_unc"])
+            F_ref = float(row["F_ref"])
+            lmbda = float(row["lambda"])
+            lambda_unc = float(row["lambda_unc"])
+            T_eq = float(row["T_eq"])
+            epsilon = float(row["epsilon"])
+            epsilon_unc = float(row["epsilon_unc"])
 
-               slow = fit_slow_mode(bundle.t_late, bundle.T_late, T_eq)
-               tau_s = slow["tau_s"]
-               a_s = slow["a_s"]
-               a_f = slow["a_f"]
-               tau_s_unc = slow["tau_s_unc"]
-               a_s_unc = slow["a_s_unc"]
-               a_f_unc = slow["a_f_unc"]
+            slow = fit_slow_mode(bundle.t_late, bundle.T_late, T_eq)
+            tau_s = slow["tau_s"]
+            a_s = slow["a_s"]
+            a_f = slow["a_f"]
+            tau_s_unc = slow["tau_s_unc"]
+            a_s_unc = slow["a_s_unc"]
+            a_f_unc = slow["a_f_unc"]
 
-               if a_f <= 0 or a_s <= 0:
+            if a_f <= 0 or a_s <= 0:
+                  if VERBOSE:
                      print(f"WARNING: {model} has non-positive mode amplitude(s): a_f={a_f:.4g}, a_s={a_s:.4g}")
 
-               tau_f, tau_f_unc = fit_fast_mode(bundle.t_early, bundle.T_early, T_eq, a_f, a_s, tau_s)
-               if not np.isfinite(tau_f):
+            tau_f, tau_f_unc = fit_fast_mode(bundle.t_early, bundle.T_early, T_eq, a_f, a_s, tau_s)
+            if not np.isfinite(tau_f):
+                  if VERBOSE:
                      print(f"WARNING: {model} tau_f fit failed; using 4 years as fallback.")
-                     tau_f = 4.0
-                     tau_f_unc = np.nan
+                  tau_f = 4.0
+                  tau_f_unc = np.nan
 
-               thermal = thermal_params_from_modes(lmbda, a_f, a_s, tau_f, tau_s, epsilon)
-               if thermal["C"] <= 0 or thermal["C0"] <= 0 or thermal["gamma"] <= 0:
+            thermal = thermal_params_from_modes(lmbda, a_f, a_s, tau_f, tau_s, epsilon)
+            if thermal["C"] <= 0 or thermal["C0"] <= 0 or thermal["gamma"] <= 0:
+                  if VERBOSE:
                      print(
                         f"WARNING: {model} non-physical thermal parameters: "
                         f"C={thermal['C']:.3g}, C0={thermal['C0']:.3g}, gamma={thermal['gamma']:.3g}"
                      )
 
-               therm_unc = thermal_uncertainties(
-                     lmbda=lmbda,
-                     lambda_unc=lambda_unc,
-                     a_s=a_s,
-                     a_s_unc=a_s_unc,
-                     tau_s=tau_s,
-                     tau_s_unc=tau_s_unc,
-                     tau_f=tau_f,
-                     tau_f_unc=tau_f_unc,
-                     epsilon=epsilon,
-                     epsilon_unc=epsilon_unc,
-               )
+            therm_unc = thermal_uncertainties(
+                  lmbda=lmbda,
+                  lambda_unc=lambda_unc,
+                  a_s=a_s,
+                  a_s_unc=a_s_unc,
+                  tau_s=tau_s,
+                  tau_s_unc=tau_s_unc,
+                  tau_f=tau_f,
+                  tau_f_unc=tau_f_unc,
+                  epsilon=epsilon,
+                  epsilon_unc=epsilon_unc,
+            )
 
-               update_row(
-                     df,
-                     model,
-                     {
-                        **thermal,
-                        **therm_unc,
-                        "tau_f": tau_f,
-                        "tau_s": tau_s,
-                        "a_f": a_f,
-                        "a_s": a_s,
-                        "tau_f_unc": tau_f_unc,
-                        "tau_s_unc": tau_s_unc,
-                        "a_f_unc": a_f_unc,
-                        "a_s_unc": a_s_unc,
-                     },
-               )
+            update_row(
+                  df,
+                  model,
+                  {
+                     **thermal,
+                     **therm_unc,
+                     "tau_f": tau_f,
+                     "tau_s": tau_s,
+                     "a_f": a_f,
+                     "a_s": a_s,
+                     "tau_f_unc": tau_f_unc,
+                     "tau_s_unc": tau_s_unc,
+                     "a_f_unc": a_f_unc,
+                     "a_s_unc": a_s_unc,
+                  },
+            )
 
-               plot_slow_fit(step2_axs[imodel], slow, model, iteration)
+            plot_slow_fit(step2_axs[imodel], slow, model, iteration)
 
-            if SAVE_ITERATION_PLOTS:
-               suffix = f"iter{iteration + 1:02d}"
-               step2_fig.savefig(
-                     outdir / current_dir / "step2" / "png" / f"4xCO2_all_models_log_Teq_minus_T_vs_t_{suffix}.png",
-                     dpi=200,
-                     bbox_inches="tight",
-               )
-               step2_fig.savefig(
-                     outdir / current_dir / "step2" / "pdf" / f"4xCO2_all_models_log_Teq_minus_T_vs_t_{suffix}.pdf",
-                     bbox_inches="tight",
-               )
-            plt.close(step2_fig)
+         if SAVE_ITERATION_PLOTS:
+            suffix = f"iter{iteration + 1:02d}"
+            step2_fig.savefig(
+                  outdir / current_dir / "step2" / "png" / f"4xCO2_all_models_log_Teq_minus_T_vs_t_{suffix}.png",
+                  dpi=200,
+                  bbox_inches="tight",
+            )
+            step2_fig.savefig(
+                  outdir / current_dir / "step2" / "pdf" / f"4xCO2_all_models_log_Teq_minus_T_vs_t_{suffix}.pdf",
+                  bbox_inches="tight",
+            )
+         plt.close(step2_fig)
 
+         if VERBOSE:
             print("Finished Step 2: thermal parameters updated")
 
-            # Save a table every iteration for debugging.
-            df.to_csv(outdir / current_dir / "tables" / f"params_iter{iteration + 1:02d}.csv", index=False)
+         # Save a table every iteration for debugging.
+         df.to_csv(outdir / current_dir / "tables" / f"params_iter{iteration + 1:02d}.csv", index=False)
 
-            # Check convergence after the minimum number of iterations.
-            new_params = numeric_params_for_convergence(df)
-            if iteration + 1 >= MIN_ITERATIONS:
-               denom = old_params.abs().replace(0, np.nan)
-               rel_change = ((new_params - old_params).abs() / denom).replace([np.inf, -np.inf], np.nan)
-               max_rel_change = float(np.nanmax(rel_change.to_numpy()))
+         # Check convergence after the minimum number of iterations.
+         new_params = numeric_params_for_convergence(df)
+         if iteration + 1 >= MIN_ITERATIONS:
+            denom = old_params.abs().replace(0, np.nan)
+            rel_change = ((new_params - old_params).abs() / denom).replace([np.inf, -np.inf], np.nan)
+            max_rel_change = float(np.nanmax(rel_change.to_numpy()))
+            if VERBOSE:
                print(f"Max relative parameter change: {max_rel_change:.3e}")
-               if np.isfinite(max_rel_change) and max_rel_change < CONVERGENCE_RTOL:
-                     converged = True
-                     last_iteration = iteration
+            if np.isfinite(max_rel_change) and max_rel_change < CONVERGENCE_RTOL:
+                  converged = True
+                  last_iteration = iteration
+                  if VERBOSE:
                      print(f"Converged after {iteration + 1} iterations.")
-                     break
+                  break
 
-            last_iteration = iteration
+         last_iteration = iteration
 
-         if not converged:
-            print(f"Did not meet convergence tolerance after {MAX_ITERATIONS} iterations; using final iteration.")
+      if not converged:
+         print(f"Did not meet convergence tolerance after {MAX_ITERATIONS} iterations; using final iteration.")
 
-         # Final parameter table.
-         df.to_csv(outdir / current_dir / "tables" / "params_final.csv", index=False)
-         print(df)
+      # Final parameter table.
+      df.to_csv(outdir / current_dir / "tables" / "params_final.csv", index=False)
+      print(df)
 
-         # ------------------------- Compare parameters to paper values -------------------------
+      # ------------------------- Compare parameters to paper values -------------------------
 
-         model_paperParams = {
-            "GISSE2R": {
-               "F_ref": 9.1,
-               "lambda": 2.03,
-               "epsilon": 1.44,
-               "T_eq": 4.5,
-               "C": 6.1,
-               "C0": 134,
-               "gamma": 1.06,
-               "tau_f": 1.7,
-               "tau_s": 224,
-            },
-            "HadGEM2": {
-               "F_ref": 6.8,
-               "lambda": 0.61,
-               "epsilon": 1.54,
-               "T_eq": 11.1,
-               "C": 7.5,
-               "C0": 98,
-               "gamma": 0.49,
-               "tau_f": 5.4,
-               "tau_s": 457,
-            },
-            "IPSLCM5A": {
-               "F_ref": 6.7,
-               "lambda": 0.79,
-               "epsilon": 1.14,
-               "T_eq": 8.5,
-               "C": 8.1,
-               "C0": 100,
-               "gamma": 0.57,
-               "tau_f": 5.5,
-               "tau_s": 327,
-            },
-            "MPIESM11": {
-               "F_ref": 9.4,
-               "lambda": 1.21,
-               "epsilon": 1.42,
-               "T_eq": 7.8,
-               "C": 8.5,
-               "C0": 78,
-               "gamma": 0.62,
-               "tau_f": 4.0,
-               "tau_s": 220,
-            },
-         }
+      model_paperParams = {
+         "GISSE2R": {
+            "F_ref": 9.1,
+            "lambda": 2.03,
+            "epsilon": 1.44,
+            "T_eq": 4.5,
+            "C": 6.1,
+            "C0": 134,
+            "gamma": 1.06,
+            "tau_f": 1.7,
+            "tau_s": 224,
+         },
+         "HadGEM2": {
+            "F_ref": 6.8,
+            "lambda": 0.61,
+            "epsilon": 1.54,
+            "T_eq": 11.1,
+            "C": 7.5,
+            "C0": 98,
+            "gamma": 0.49,
+            "tau_f": 5.4,
+            "tau_s": 457,
+         },
+         "IPSLCM5A": {
+            "F_ref": 6.7,
+            "lambda": 0.79,
+            "epsilon": 1.14,
+            "T_eq": 8.5,
+            "C": 8.1,
+            "C0": 100,
+            "gamma": 0.57,
+            "tau_f": 5.5,
+            "tau_s": 327,
+         },
+         "MPIESM11": {
+            "F_ref": 9.4,
+            "lambda": 1.21,
+            "epsilon": 1.42,
+            "T_eq": 7.8,
+            "C": 8.5,
+            "C0": 78,
+            "gamma": 0.62,
+            "tau_f": 4.0,
+            "tau_s": 220,
+         },
+      }
 
-         colors = [
-            ("#ef9a9a", "#b71c1c"),
-            ("#90caf9", "#1565c0"),
-            ("#a5d6a7", "#2e7d32"),
-            ("#ffcc80", "#ef6c00"),
-         ]
+      colors = [
+         ("#ef9a9a", "#b71c1c"),
+         ("#90caf9", "#1565c0"),
+         ("#a5d6a7", "#2e7d32"),
+         ("#ffcc80", "#ef6c00"),
+      ]
 
-         available_validation_models = [m for m in model_paperParams if m in set(df["model"])]
-         if len(available_validation_models) > 0:
-            validation_vars = list(model_paperParams[available_validation_models[0]].keys())
-            nvars = len(validation_vars)
-            ncols = 5
-            nrows = int(np.ceil(nvars / ncols))
-            fig_val, axs_val = plt.subplots(
-               nrows,
-               ncols,
-               figsize=(6 * ncols, 6 * nrows),
-               constrained_layout=True,
-            )
-            axs_val = np.asarray(axs_val).ravel()
+      available_validation_models = [m for m in model_paperParams if m in set(df["model"])]
+      if len(available_validation_models) > 0:
+         validation_vars = list(model_paperParams[available_validation_models[0]].keys())
+         nvars = len(validation_vars)
+         # NOTE: model_paperParams has 9 keys (includes epsilon), which doesn't fit
+         # make_model_grid's fixed 4x2/8-panel assumption, so this grid is built
+         # manually with the same spacing/styling conventions instead.
+         ncols = 5
+         nrows = int(np.ceil(nvars / ncols))
+         fig_val, axs_val = plt.subplots(
+            nrows,
+            ncols,
+            figsize=(6 * ncols, 6 * nrows),
+            constrained_layout=False,
+         )
+         fig_val.subplots_adjust(left=0.05, right=0.98, bottom=0.075, top=0.95, wspace=0.12, hspace=0.18)
+         fig_val.suptitle("Geoffroy vs. replication (w/ 95% CI)", fontsize=20, fontweight="bold")
+         fig_val.text(0.02, 0.5, "A.U.", ha='center', va='center', fontsize=18, fontweight="bold", rotation=90.)
+         axs_val = np.asarray(axs_val).ravel()
 
-            for ivar, var in enumerate(validation_vars):
-               ax = axs_val[ivar]
-               handles = []
-               values_for_range = []
+         for ivar, var in enumerate(validation_vars):
+            ax = axs_val[ivar]
+            handles = []
+            values_for_range = []
 
-               for model, (face, edge) in zip(available_validation_models, colors):
-                     mu_GF = float(model_paperParams[model][var])
-                     mu_SN = float(df.loc[df["model"] == model, var].iloc[0])
-                     unc_col = f"{var}_unc"
-                     mu_unc = float(df.loc[df["model"] == model, unc_col].iloc[0]) if unc_col in df.columns else np.nan
-                     xerr = None if not np.isfinite(mu_unc) else mu_unc * 1.96
+            for model, (face, edge) in zip(available_validation_models, colors):
+                  mu_GF = float(model_paperParams[model][var])
+                  mu_SN = float(df.loc[df["model"] == model, var].iloc[0])
+                  unc_col = f"{var}_unc"
+                  mu_unc = float(df.loc[df["model"] == model, unc_col].iloc[0]) if unc_col in df.columns else np.nan
+                  xerr = None if not np.isfinite(mu_unc) else mu_unc * 1.96
 
-                     ax.errorbar(
-                        mu_SN,
-                        mu_GF,
-                        xerr=xerr,
+                  ax.errorbar(
+                     mu_SN,
+                     mu_GF,
+                     xerr=xerr,
+                     marker=".",
+                     ms=13,
+                     mfc=face,
+                     mec=edge,
+                     ecolor=edge,
+                     linewidth=1.5,
+                     zorder=3,
+                  )
+                  values_for_range.extend([mu_SN, mu_GF])
+                  handles.append(
+                     Line2D(
+                        [],
+                        [],
                         marker=".",
-                        ms=13,
-                        mfc=face,
-                        mec=edge,
-                        ecolor=edge,
-                        linewidth=1.5,
-                        zorder=3,
+                        linestyle="None",
+                        markersize=13,
+                        markerfacecolor=face,
+                        markeredgecolor=edge,
+                        markeredgewidth=1.5,
+                        label=model,
                      )
-                     values_for_range.extend([mu_SN, mu_GF])
-                     handles.append(
-                        Line2D(
-                           [],
-                           [],
-                           marker=".",
-                           linestyle="None",
-                           markersize=13,
-                           markerfacecolor=face,
-                           markeredgecolor=edge,
-                           markeredgewidth=1.5,
-                           label=model,
-                        )
-                     )
+                  )
 
-               arr = np.asarray(values_for_range, dtype=float)
-               arr = arr[np.isfinite(arr)]
-               if len(arr) > 0:
-                     lo, hi = np.min(arr), np.max(arr)
-                     pad = 0.05 * (hi - lo) if hi > lo else 1.0
-                     one_to_one = np.linspace(lo - pad, hi + pad, 200)
-                     ax.plot(one_to_one, one_to_one, "k--", label=r"$\mu_{\rm GF}=\mu_{\rm SN}$")
+            arr = np.asarray(values_for_range, dtype=float)
+            arr = arr[np.isfinite(arr)]
+            if len(arr) > 0:
+                  lo, hi = np.min(arr), np.max(arr)
+                  pad = 0.05 * (hi - lo) if hi > lo else 1.0
+                  one_to_one = np.linspace(lo - pad, hi + pad, 200)
+                  ax.plot(one_to_one, one_to_one, "k--", label=r"$\mu_{\rm GF}=\mu_{\rm SN}$")
 
-               ax.set_xlabel(r"$\mu_{\rm SN}$")
-               ax.set_ylabel(r"$\mu_{\rm GF}$")
-               ax.set_title(f"{var}: Geoffroy vs. replication")
-               ax.tick_params(axis="x", rotation=45)
-               ax.legend(handles=handles, fontsize=8, loc='upper left')
+            format_ax(ax, text=var, xlabel=r"$\mu_{\rm SN}$", xscale="linear", yscale="linear", legend=False)
+            ax.tick_params(axis="x", rotation=45)
+            ax.legend(handles=handles, loc='lower left', prop={'weight': 'bold', 'size': 10})
 
-            for ax in axs_val[nvars:]:
-               ax.set_visible(False)
+         for ax in axs_val[nvars:]:
+            ax.set_visible(False)
 
-            fig_val.savefig(
-               outdir / current_dir / "validation" / "png" / "all_validation_params_GF_vs_SN.png",
-               dpi=200,
-               bbox_inches="tight",
-            )
-            fig_val.savefig(
-               outdir / current_dir / "validation" / "pdf" / "all_validation_params_GF_vs_SN.pdf",
-               bbox_inches="tight",
-            )
-            plt.close(fig_val)
+         fig_val.savefig(
+            outdir / current_dir / "validation" / "png" / "all_validation_params_GF_vs_SN.png",
+            dpi=200,
+            bbox_inches="tight",
+         )
+         fig_val.savefig(
+            outdir / current_dir / "validation" / "pdf" / "all_validation_params_GF_vs_SN.pdf",
+            bbox_inches="tight",
+         )
+         plt.close(fig_val)
+      else:
+         print("Skipping validation plot: none of the hard-coded paper model names are present in df.")
+
+
+      # ------------------------- Final result plots -------------------------
+
+      # These plots intentionally mirror the final plotting block in
+      # 2013a_allModels.py, while using the EBM-epsilon parameterization.
+      #
+      # IMPORTANT: this is separate from the calibration bundle above.
+      # In 2013a_allModels.py, changing results from "validation" to
+      # "unblinded" changes how much of the 4xCO2/piControl data is shown:
+      #   - validation: first 151 values
+      #   - unblinded: full available time series
+      # The helper below preserves that behavior for the 2013b script.
+
+      VALIDATION_PLOT_YEARS = 151
+
+      # Approximate transient climate response values used by the OHC-vs-Ts
+      # unblinded plot in 2013a_allModels.py.
+      tcr = {
+         "CCSM3": 1.7,
+         "CESM1": 2.0,
+         "CNRMCM6": 2.1,
+         "ECHAM5": 3.0,
+         "GISSE2R": 1.5,
+         "IPSLCM5A": 2.3,
+         "HadGEM2": 2.5,
+         "MPIESM11": 2.0,
+      }
+
+
+      def make_result_series(model_data, results):
+         """
+         Return the plotting time series with the same validation/unblinded
+         selection logic as 2013a_allModels.py.
+
+         The calibration code uses a fixed, internally consistent calibration
+         bundle. This helper is only for final plotting and intentionally
+         follows the result-window behavior of the 2013a script.
+         """
+         T_ctrl_raw = get_r_array(model_data, "piControl", "T2M")
+         N_ctrl_raw = get_r_array(model_data, "piControl", "NETTOA")
+         T_4x_raw = get_r_array(model_data, "4xCO2", "T2M")
+         N_4x_raw = get_r_array(model_data, "4xCO2", "NETTOA")
+
+         if results == "validation":
+            T_ctrl = T_ctrl_raw[:VALIDATION_PLOT_YEARS]
+            N_ctrl = N_ctrl_raw[:VALIDATION_PLOT_YEARS]
+            T_4x = T_4x_raw[:VALIDATION_PLOT_YEARS]
+            N_4x = N_4x_raw[:VALIDATION_PLOT_YEARS]
+         elif results == "unblinded":
+            T_ctrl = T_ctrl_raw
+            N_ctrl = N_ctrl_raw
+            T_4x = T_4x_raw
+            N_4x = N_4x_raw
          else:
-            print("Skipping validation plot: none of the hard-coded paper model names are present in df.")
+            raise ValueError("results must be either 'validation' or 'unblinded'.")
+
+         if SUBTRACT_PICONTROL_BASELINE:
+            T_base = float(np.nanmean(T_ctrl))
+            N_base = float(np.nanmean(N_ctrl))
+         else:
+            T_base = 0.0
+            N_base = 0.0
+
+         T = T_4x - T_base
+         N = N_4x - N_base
+         t = np.arange(1, 1 + len(T), dtype=float)
+
+         good = finite_pair_mask(t, T, N)
+         return t[good], T[good], N[good]
 
 
-         # ------------------------- Final result plots -------------------------
-
-         # These plots intentionally mirror the final plotting block in
-         # 2013a_allModels.py, while using the EBM-epsilon parameterization.
-         #
-         # IMPORTANT: this is separate from the calibration bundle above.
-         # In 2013a_allModels.py, changing results from "validation" to
-         # "unblinded" changes how much of the 4xCO2/piControl data is shown:
-         #   - validation: first 151 values
-         #   - unblinded: full available time series
-         # The helper below preserves that behavior for the 2013b script.
-
-         VALIDATION_PLOT_YEARS = 151
-
-         # Approximate transient climate response values used by the OHC-vs-Ts
-         # unblinded plot in 2013a_allModels.py.
-         tcr = {
-            "CCSM3": 1.7,
-            "CESM1": 2.0,
-            "CNRMCM6": 2.1,
-            "ECHAM5": 3.0,
-            "GISSE2R": 1.5,
-            "IPSLCM5A": 2.3,
-            "HadGEM2": 2.5,
-            "MPIESM11": 2.0,
-         }
+      def ebm_epsilon_nettoa(t, F_ref, lmbda, epsilon, C, T_eq, a_f, a_s, tau_f, tau_s):
+         """TOA imbalance from the final EBM-epsilon solution."""
+         T_fit = T_model(t, T_eq, a_f, a_s, tau_f, tau_s)
+         H_fit = H_physical_from_previous_solution(
+            t,
+            F_ref=F_ref,
+            lmbda=lmbda,
+            C=C,
+            epsilon=epsilon,
+            T_eq=T_eq,
+            a_f=a_f,
+            a_s=a_s,
+            tau_f=tau_f,
+            tau_s=tau_s,
+         )
+         return F_ref - lmbda * T_fit - (epsilon - 1.0) * H_fit
 
 
-         def make_result_series(model_data, results):
-            """
-            Return the plotting time series with the same validation/unblinded
-            selection logic as 2013a_allModels.py.
-
-            The calibration code uses a fixed, internally consistent calibration
-            bundle. This helper is only for final plotting and intentionally
-            follows the result-window behavior of the 2013a script.
-            """
-            T_ctrl_raw = get_r_array(model_data, "piControl", "T2M")
-            N_ctrl_raw = get_r_array(model_data, "piControl", "NETTOA")
-            T_4x_raw = get_r_array(model_data, "4xCO2", "T2M")
-            N_4x_raw = get_r_array(model_data, "4xCO2", "NETTOA")
-
-            if results == "validation":
-               T_ctrl = T_ctrl_raw[:VALIDATION_PLOT_YEARS]
-               N_ctrl = N_ctrl_raw[:VALIDATION_PLOT_YEARS]
-               T_4x = T_4x_raw[:VALIDATION_PLOT_YEARS]
-               N_4x = N_4x_raw[:VALIDATION_PLOT_YEARS]
-            elif results == "unblinded":
-               T_ctrl = T_ctrl_raw
-               N_ctrl = N_ctrl_raw
-               T_4x = T_4x_raw
-               N_4x = N_4x_raw
-            else:
-               raise ValueError("results must be either 'validation' or 'unblinded'.")
-
-            if SUBTRACT_PICONTROL_BASELINE:
-               T_base = float(np.nanmean(T_ctrl))
-               N_base = float(np.nanmean(N_ctrl))
-            else:
-               T_base = 0.0
-               N_base = 0.0
-
-            T = T_4x - T_base
-            N = N_4x - N_base
-            t = np.arange(1, 1 + len(T), dtype=float)
-
-            good = finite_pair_mask(t, T, N)
-            return t[good], T[good], N[good]
+      def rolling_mean(x, window=10):
+         x = np.asarray(x, dtype=float)
+         if len(x) < window:
+            return np.array([], dtype=float)
+         return np.array([np.nanmean(x[i : i + window]) for i in range(len(x) - window + 1)], dtype=float)
 
 
-         def ebm_epsilon_nettoa(t, F_ref, lmbda, epsilon, C, T_eq, a_f, a_s, tau_f, tau_s):
-            """TOA imbalance from the final EBM-epsilon solution."""
-            T_fit = T_model(t, T_eq, a_f, a_s, tau_f, tau_s)
-            H_fit = H_physical_from_previous_solution(
-               t,
-               F_ref=F_ref,
-               lmbda=lmbda,
-               C=C,
-               epsilon=epsilon,
-               T_eq=T_eq,
-               a_f=a_f,
-               a_s=a_s,
-               tau_f=tau_f,
-               tau_s=tau_s,
-            )
-            return F_ref - lmbda * T_fit - (epsilon - 1.0) * H_fit
+      final_fig, final_axs = make_model_grid(
+         models, dpi=120,
+         title=r"4xCO$_{2}$ T$_{2M}$ vs. Time w/ EBM-$\epsilon$ Fit",
+         xlabel=r"Time (years)", ylabel=r"Temperature Anomaly (K)",
+         right=0.95, wspace=0.28,
+      )
+      final_xmax = []
+      final_fig.text(0.975, 0.5, "Equilibrium Ratio", ha='center', va='center', fontsize=18, fontweight="bold", rotation=-90.)
 
+      nettoa_fig, nettoa_axs = make_model_grid(
+         models,
+         title=r"4xCO$_{2}$ Net TOA vs. Time",
+         xlabel="Time (years)", ylabel=r"Net TOA (10 yr rolling mean, $W\,m^{-2}$)",
+      )
 
-         def rolling_mean(x, window=10):
-            x = np.asarray(x, dtype=float)
-            if len(x) < window:
-               return np.array([], dtype=float)
-            return np.array([np.nanmean(x[i : i + window]) for i in range(len(x) - window + 1)], dtype=float)
+      # These two are only populated/saved for unblinded runs, matching 2013a_allModels.py.
+      ohct_fig = None
+      ohct_axs = None
+      assmpt_fig = None
+      assmpt_axs = None
+      if results == "unblinded":
+         ohct_fig, ohct_axs = make_model_grid(
+            models,
+            title=r"4xCO$_2$ OHU vs. Surface Temp (Normalized)",
+            xlabel=r"$T_s/2\, \mathrm{ECS}$", ylabel=r"$\mathrm{OHC}/\mathrm{OHC}_{eq}$",
+         )
+         assmpt_fig, assmpt_axs = make_model_grid(
+            models,
+            title=r"4xCO$_{2}$ Assumption 2 Test",
+            xlabel="Time (years)", ylabel=r"$C_{u}\frac{dT_{u}}{dt}$",
+         )
 
+      sc_for_cbar = None
+      rng = np.random.default_rng(12345)
 
-         final_fig, final_axs = make_model_grid(models, width_per_ax=10.8, height_per_ax=7.2, dpi=120)
-         nettoa_fig, nettoa_axs = make_model_grid(models, width_per_ax=7, height_per_ax=5)
+      for imodel, model in enumerate(models):
+         t, T_obs, N_obs = make_result_series(data.rx2(model), results)
+         row = df.loc[df["model"] == model].iloc[0]
 
-         # These two are only populated/saved for unblinded runs, matching 2013a_allModels.py.
-         ohct_fig = None
-         ohct_axs = None
-         assmpt_fig = None
-         assmpt_axs = None
+         F_ref = float(row["F_ref"])
+         lmbda = float(row["lambda"])
+         epsilon = float(row["epsilon"])
+         C = float(row["C"])
+         T_eq = float(row["T_eq"])
+         a_f = float(row["a_f"])
+         a_s = float(row["a_s"])
+         tau_f = float(row["tau_f"])
+         tau_s = float(row["tau_s"])
+
+         T_eq_unc = float(row["T_eq_unc"])
+         a_s_unc = float(row["a_s_unc"])
+         tau_f_unc = float(row["tau_f_unc"])
+         tau_s_unc = float(row["tau_s_unc"])
+
+         T_fit = T_model(t, T_eq, a_f, a_s, tau_f, tau_s)
+         N_fit = ebm_epsilon_nettoa(t, F_ref, lmbda, epsilon, C, T_eq, a_f, a_s, tau_f, tau_s)
+
+         # ----------------- T2M time-series plot -----------------
+         ax = final_axs[imodel]
+         ax.scatter(t, T_obs, s=4, color="red")
+         ax.plot(t, T_obs, color="red", label="2-m Surface Temp.")
+         ax.plot(t, T_fit, color="blue", label="EBM-ε Fit")
+
+         iterations = 1000
+         if np.all(np.isfinite([T_eq_unc, a_s_unc, tau_f_unc, tau_s_unc])):
+            param_mean = np.array([T_eq, a_s, tau_f, tau_s], dtype=float)
+            param_cov = np.diag(np.array([T_eq_unc**2, a_s_unc**2, tau_f_unc**2, tau_s_unc**2], dtype=float))
+            params = rng.multivariate_normal(param_mean, param_cov, size=iterations)
+
+            T_ensemble = []
+            for T_eq_i, a_s_i, tau_f_i, tau_s_i in params:
+                  if tau_f_i <= 0 or tau_s_i <= 0 or a_s_i <= 0 or a_s_i >= 1:
+                     continue
+                  T_ensemble.append(
+                     T_model(t, T_eq_i, 1.0 - a_s_i, a_s_i, tau_f_i, tau_s_i)
+                  )
+
+            if len(T_ensemble) > 0:
+                  T_ensemble = np.vstack(T_ensemble)
+                  T_mean = np.nanmean(T_ensemble, axis=0)
+                  T_std = np.nanstd(T_ensemble, axis=0)
+                  ax.fill_between(t, T_mean - 2 * T_std, T_mean + 2 * T_std, color="blue", alpha=0.08, label="±2σ")
+                  ax.fill_between(t, T_mean - T_std, T_mean + T_std, color="blue", alpha=0.20, label="±1σ")
+
+         ax.text(
+            0.02,
+            0.88,
+            f"$\\tau_s$ = {tau_s:.1f} yr\n$\\epsilon$ = {epsilon:.2f}",
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+            fontsize=8,
+            bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4),
+         )
+         ax.axvline(150, color="orange", linestyle=":", linewidth=1, alpha=0.7)
+
+         y_bottom, y_top = 1, 1.25 * T_eq
+         ratio_ticks = np.arange(0.2, 1.21, 0.2)
+         format_ax(
+            ax,
+            text=model,
+            xscale="linear",
+            yscale="linear",
+            ylim=(y_bottom, y_top),
+            yticks=ratio_ticks * T_eq,
+            legend_loc='lower right',
+         )
+         final_xmax.append(np.max(t))
+
+         # Secondary y-axis showing T/T_eq (Equilibrium Ratio) on the same scale;
+         # ratio ticks match the left axis's fractions so gridlines line up exactly.
+         ax2 = ax.twinx()
+         ax2.set_ylim(y_bottom / T_eq, y_top / T_eq)
+         ax2.set_yticks(ratio_ticks)
+         ax2.tick_params(labelsize=14, width=2, length=8, direction="in")
+
+         # ----------------- NETTOA time-series plot -----------------
+         T_obs_roll = rolling_mean(T_obs, window=10)
+         N_obs_roll = rolling_mean(N_obs, window=10)
+            
+         H_fit = H_physical_from_previous_solution(
+             t,
+             F_ref=F_ref,
+             lmbda=lmbda,
+             C=C,
+             epsilon=epsilon,
+             T_eq=T_eq,
+             a_f=a_f,
+             a_s=a_s,
+             tau_f=tau_f,
+             tau_s=tau_s,
+         )
+         H_fit_roll = rolling_mean(H_fit, window=10)
+            
+         t_roll = t[: len(N_obs_roll)]
+            
+         ax = nettoa_axs[imodel]
+         if len(N_obs_roll) > 0:
+             ax.plot(t_roll, N_obs_roll, color="black", label="AOGCM")
+            
+             ax.plot(
+                 t_roll,
+                 F_ref - lmbda * T_obs_roll - (epsilon - 1.0) * H_fit_roll,
+                 label=r"$F-\lambda T-(\epsilon-1)H$",
+             )
+
          if results == "unblinded":
-            ohct_fig, ohct_axs = make_model_grid(models, width_per_ax=6, height_per_ax=6)
-            assmpt_fig, assmpt_axs = make_model_grid(models, width_per_ax=6, height_per_ax=6)
+             ax.plot(t, N_fit, label="EBM-ε fit")
 
-         scale = "linear" if lin else "log"
-         sc_for_cbar = None
-         rng = np.random.default_rng(12345)
+         format_ax(ax, text=model, xscale="linear", yscale="log", legend_loc='lower left')
 
-         for imodel, model in enumerate(models):
-            t, T_obs, N_obs = make_result_series(data.rx2(model), results)
-            row = df.loc[df["model"] == model].iloc[0]
+         if results == "unblinded":
+            # ----------------- OHC vs. T_s plot -----------------
+            t_long = np.arange(1, 1 + 100000, dtype=float)
+            T_long = T_model(t_long, T_eq, a_f, a_s, tau_f, tau_s)
+            N_long = ebm_epsilon_nettoa(t_long, F_ref, lmbda, epsilon, C, T_eq, a_f, a_s, tau_f, tau_s)
 
-            F_ref = float(row["F_ref"])
-            lmbda = float(row["lambda"])
-            epsilon = float(row["epsilon"])
-            C = float(row["C"])
-            T_eq = float(row["T_eq"])
-            a_f = float(row["a_f"])
-            a_s = float(row["a_s"])
-            tau_f = float(row["tau_f"])
-            tau_s = float(row["tau_s"])
+            normalized_OHC_pred = (5.1e14 * 31536000 * np.cumsum(N_long)) / (1.37e21 * 3850)
+            normalized_OHC = (5.1e14 * 31536000 * np.cumsum(N_obs)) / (1.37e21 * 3850)
 
-            T_eq_unc = float(row["T_eq_unc"])
-            a_s_unc = float(row["a_s_unc"])
-            tau_f_unc = float(row["tau_f_unc"])
-            tau_s_unc = float(row["tau_s_unc"])
+            ax = ohct_axs[imodel]
+            cmap = plt.cm.turbo
+            norm = mpl.colors.Normalize(vmin=0, vmax=max(6000, len(T_obs)))
+            sc_for_cbar = ax.scatter(T_obs / T_eq, normalized_OHC / T_eq, c=t, cmap=cmap, norm=norm)
 
-            T_fit = T_model(t, T_eq, a_f, a_s, tau_f, tau_s)
-            N_fit = ebm_epsilon_nettoa(t, F_ref, lmbda, epsilon, C, T_eq, a_f, a_s, tau_f, tau_s)
+            if len(T_obs) >= 5:
+                  m_ohcTs, b_ohcTs = np.polyfit(T_obs[:5] / T_eq, normalized_OHC[:5] / T_eq, 1)
+                  t_val = np.arange(0, 1.1, 0.1)
+                  ax.plot(t_val, m_ohcTs * t_val + b_ohcTs, ls="--", color="red", label=f"Mixed Layer Depth = {(m_ohcTs * 2500):.0f} m")
+            else:
+                  t_val = np.arange(0, 1.1, 0.1)
 
-            # ----------------- T2M time-series plot -----------------
-            ax = final_axs[imodel]
-            ax.scatter(t, T_obs, s=4, color="red")
-            ax.plot(t, T_obs, color="red", label="2-m Surface Temp.")
-            ax.plot(t, T_fit, color="blue", label="EBM-ε Fit")
+            A = np.nan
+            if model in tcr and np.isfinite(T_eq) and T_eq != 0:
+                  A = 2 * tcr[model] / T_eq
+                  ax.plot(t_val, (t_val - A) / (1 - A), ls="--", color="black", label="2-box Asymptotic Pred.")
+                  ax.axvline(A, color="0.55", ls="--", lw=0.8)
 
-            iterations = 1000
-            if np.all(np.isfinite([T_eq_unc, a_s_unc, tau_f_unc, tau_s_unc])):
-               param_mean = np.array([T_eq, a_s, tau_f, tau_s], dtype=float)
-               param_cov = np.diag(np.array([T_eq_unc**2, a_s_unc**2, tau_f_unc**2, tau_s_unc**2], dtype=float))
-               params = rng.multivariate_normal(param_mean, param_cov, size=iterations)
+            ax.plot(T_long / T_eq, normalized_OHC_pred / T_eq, color="green", label="EBM-ε Pred.")
+            ax.axvline(1.0, color="0.55", ls="--", lw=0.8)
+            format_ax(ax, text=model, xscale="linear", yscale="linear", ylim=(-0.05, 1.2))
 
-               T_ensemble = []
-               for T_eq_i, a_s_i, tau_f_i, tau_s_i in params:
-                     if tau_f_i <= 0 or tau_s_i <= 0 or a_s_i <= 0 or a_s_i >= 1:
-                        continue
-                     T_ensemble.append(
-                        T_model(t, T_eq_i, 1.0 - a_s_i, a_s_i, tau_f_i, tau_s_i)
-                     )
+            # ----------------- C dT/dt assumption-test plot -----------------
+            dT_dt_fit = np.gradient(T_fit)
+            dT_dt_true = np.gradient(T_obs_roll) if len(T_obs_roll) > 1 else np.array([], dtype=float)
+            F_thresh = F_ref / 100.0
 
-               if len(T_ensemble) > 0:
-                     T_ensemble = np.vstack(T_ensemble)
-                     T_mean = np.nanmean(T_ensemble, axis=0)
-                     T_std = np.nanstd(T_ensemble, axis=0)
-                     ax.fill_between(t, T_mean - 2 * T_std, T_mean + 2 * T_std, color="blue", alpha=0.08, label="±2σ")
-                     ax.fill_between(t, T_mean - T_std, T_mean + T_std, color="blue", alpha=0.20, label="±1σ")
+            ax = assmpt_axs[imodel]
+            if len(dT_dt_true) > 0:
+                  ax.plot(t[: len(dT_dt_true)], C * dT_dt_true, color="black", label="AOGCM (10 yr running mean)")
+            ax.plot(t, C * dT_dt_fit, ls="--", color="blue", label="EBM-ε")
+            ax.axhline(F_thresh, color="0.55", ls="--", lw=0.8, label="Order of Mag. Threshold")
+            format_ax(ax, text=model, xscale='log', yscale='linear')
 
-            ax.text(
-               0.02,
-               0.98,
-               rf"$\tau_s$ = {tau_s:.1f} yr\n$\epsilon$ = {epsilon:.2f}",
-               transform=ax.transAxes,
-               va="top",
-               ha="left",
-               fontsize=8,
-            )
-            ax.axvline(150, color="orange", linestyle=":", linewidth=1, alpha=0.7)
-            ax.set_xlabel(r"Time (years)")
-            ax.set_ylabel(r"Temperature Anomaly (K)")
-            ax.set_title(f"{model} 4xCO2: T2M w/ EBM-ε fit")
-            ax.set_ylim(1, 11)
+
+      # Save combined final figures in both linear and log x-scale variants, with the
+      # same naming/placement pattern as 2013a_allModels.py.
+      for scale in ["linear", "log"]:
+         for ax, xmax in zip(final_axs, final_xmax):
             ax.set_xscale(scale)
-            ax.legend(fontsize=8, loc="upper right")
-            if lin:
-               ax.set_xticks(np.linspace(1, np.max(t) + 1, 10))
-               ax.set_yticks(np.linspace(1, 11, 4))
+            ax.set_xlim(1, xmax + 1)
+            if scale == "linear":
+               ax.set_xticks(np.linspace(1, xmax + 1, 5))
+            else:
+               ax.xaxis.set_major_locator(mpl.ticker.LogLocator())
 
-            # ----------------- NETTOA time-series plot -----------------
-            T_obs_roll = rolling_mean(T_obs, window=10)
-            N_obs_roll = rolling_mean(N_obs, window=10)
-            
-            H_fit = H_physical_from_previous_solution(
-                t,
-                F_ref=F_ref,
-                lmbda=lmbda,
-                C=C,
-                epsilon=epsilon,
-                T_eq=T_eq,
-                a_f=a_f,
-                a_s=a_s,
-                tau_f=tau_f,
-                tau_s=tau_s,
-            )
-            H_fit_roll = rolling_mean(H_fit, window=10)
-            
-            t_roll = t[: len(N_obs_roll)]
-            
-            ax = nettoa_axs[imodel]
-            if len(N_obs_roll) > 0:
-                ax.plot(t_roll, N_obs_roll, color="black", label="AOGCM")
-            
-                ax.plot(
-                    t_roll,
-                    F_ref - lmbda * T_obs_roll - (epsilon - 1.0) * H_fit_roll,
-                    label=r"$F-\lambda T-(\epsilon-1)H$",
-                )
-
-            if results == "unblinded":
-                ax.plot(t, N_fit, label="EBM-ε fit")
-            
-            ax.set_title(f"{model} 4xCO2 Net TOA (W m$^{{-2}}$)")
-            ax.set_xlabel("Time (years)")
-            ax.set_ylabel("Net TOA (10 yr rolling mean)")
+         for ax, xmax in zip(nettoa_axs, final_xmax):
             ax.set_xscale(scale)
-            ax.set_yscale("log")
-            ax.grid(True)
-            ax.legend(fontsize=8, loc="upper right")
+            ax.set_xlim(1, xmax + 1)
 
-            if results == "unblinded":
-               # ----------------- OHC vs. T_s plot -----------------
-               t_long = np.arange(1, 1 + 100000, dtype=float)
-               T_long = T_model(t_long, T_eq, a_f, a_s, tau_f, tau_s)
-               N_long = ebm_epsilon_nettoa(t_long, F_ref, lmbda, epsilon, C, T_eq, a_f, a_s, tau_f, tau_s)
-
-               normalized_OHC_pred = (5.1e14 * 31536000 * np.cumsum(N_long)) / (1.37e21 * 3850)
-               normalized_OHC = (5.1e14 * 31536000 * np.cumsum(N_obs)) / (1.37e21 * 3850)
-
-               ax = ohct_axs[imodel]
-               cmap = plt.cm.turbo
-               norm = mpl.colors.Normalize(vmin=0, vmax=max(6000, len(T_obs)))
-               sc_for_cbar = ax.scatter(T_obs / T_eq, normalized_OHC / T_eq, c=t, cmap=cmap, norm=norm)
-
-               if len(T_obs) >= 5:
-                     m_ohcTs, b_ohcTs = np.polyfit(T_obs[:5] / T_eq, normalized_OHC[:5] / T_eq, 1)
-                     t_val = np.arange(0, 1.1, 0.1)
-                     ax.plot(t_val, m_ohcTs * t_val + b_ohcTs, ls="--", color="red", label=f"Mixed Layer Depth = {(m_ohcTs * 2500):.0f} m")
-               else:
-                     t_val = np.arange(0, 1.1, 0.1)
-
-               A = np.nan
-               if model in tcr and np.isfinite(T_eq) and T_eq != 0:
-                     A = 2 * tcr[model] / T_eq
-                     ax.plot(t_val, (t_val - A) / (1 - A), ls="--", color="black", label="2-box Asymptotic Pred.")
-                     ax.axvline(A, color="0.55", ls="--", lw=0.8)
-
-               ax.plot(T_long / T_eq, normalized_OHC_pred / T_eq, color="green", label="EBM-ε Pred.")
-               ax.set_ylim(-0.05, 1.2)
-               ax.axvline(1.0, color="0.55", ls="--", lw=0.8)
-               ax.set_title(f"{model} 4xCO2: OHU vs. Surface Temp (Normalized)")
-               ax.set_xlabel(r"$\frac{T_s}{2\, \mathrm{ECS}}$")
-               ax.set_ylabel(r"$\frac{\mathrm{OHC}}{\mathrm{OHC}_{eq}}$")
-               ax.legend(fontsize=8, loc="upper left")
-
-               # ----------------- C dT/dt assumption-test plot -----------------
-               dT_dt_fit = np.gradient(T_fit)
-               dT_dt_true = np.gradient(T_obs_roll) if len(T_obs_roll) > 1 else np.array([], dtype=float)
-               F_thresh = F_ref / 100.0
-
-               ax = assmpt_axs[imodel]
-               if len(dT_dt_true) > 0:
-                     ax.plot(t[: len(dT_dt_true)], C * dT_dt_true, color="black", label="AOGCM (10 yr running mean)")
-               ax.plot(t, C * dT_dt_fit, ls="--", color="blue", label="EBM-ε")
-               ax.axhline(F_thresh, color="0.55", ls="--", lw=0.8, label="Order of Mag. Threshold")
-               ax.set_title(f"{model} 4xCO2: Assumption 2 Test")
-               ax.set_xlabel(r"Time (years)")
-               ax.set_ylabel(r"$C_{u}\frac{dT_{u}}{dt}$")
-               ax.set_xscale("log")
-               ax.legend(fontsize=8, loc="upper right")
-
-
-         # Save combined final figures with the same naming/placement pattern as 2013a_allModels.py.
          final_fig.savefig(
             outdir / current_dir / results / "png" / f"4xCO2_all_models_T2m_vs_t_{results}_{scale}.png",
             dpi=200,
@@ -1180,7 +1275,6 @@ for run_type in [1, 2, 3]:
             outdir / current_dir / results / "pdf" / f"4xCO2_all_models_T2m_vs_t_{results}_{scale}.pdf",
             bbox_inches="tight",
          )
-         plt.close(final_fig)
 
          nettoa_fig.savefig(
             outdir / current_dir / results / "png" / f"4xCO2_all_models_NETTOA_timeseries_{scale}.png",
@@ -1191,36 +1285,38 @@ for run_type in [1, 2, 3]:
             outdir / current_dir / results / "pdf" / f"4xCO2_all_models_NETTOA_timeseries_{scale}.pdf",
             bbox_inches="tight",
          )
-         plt.close(nettoa_fig)
 
-         if results == "unblinded":
-            assmpt_fig.savefig(
-               outdir / current_dir / results / "png" / f"4xCO2_all_models_cdTdt_t_{results}.png",
-               dpi=200,
-               bbox_inches="tight",
-            )
-            assmpt_fig.savefig(
-               outdir / current_dir / results / "pdf" / f"4xCO2_all_models_cdTdt_t_{results}.pdf",
-               bbox_inches="tight",
-            )
-            plt.close(assmpt_fig)
+      plt.close(final_fig)
+      plt.close(nettoa_fig)
 
-            if sc_for_cbar is not None:
-               cbar = ohct_fig.colorbar(sc_for_cbar, ax=ohct_axs.ravel().tolist(), fraction=0.025, pad=0.025)
-               cbar.set_label("Year")
+      if results == "unblinded":
+         assmpt_fig.savefig(
+            outdir / current_dir / results / "png" / f"4xCO2_all_models_cdTdt_t_{results}.png",
+            dpi=200,
+            bbox_inches="tight",
+         )
+         assmpt_fig.savefig(
+            outdir / current_dir / results / "pdf" / f"4xCO2_all_models_cdTdt_t_{results}.pdf",
+            bbox_inches="tight",
+         )
+         plt.close(assmpt_fig)
 
-            ohct_fig.savefig(
-               outdir / current_dir / results / "png" / "4xCO2_all_models_ohc_ts.png",
-               dpi=200,
-               bbox_inches="tight",
-            )
-            ohct_fig.savefig(
-               outdir / current_dir / results / "pdf" / "4xCO2_all_models_ohc_ts.pdf",
-               bbox_inches="tight",
-            )
-            plt.close(ohct_fig)
+         if sc_for_cbar is not None:
+            cbar = ohct_fig.colorbar(sc_for_cbar, ax=ohct_axs.ravel().tolist(), fraction=0.025, pad=0.025)
+            cbar.set_label("Year")
 
-         print("Finished final val/result plots")
-         print("Done.")
-         print(f"Final parameter table: {outdir / current_dir / 'tables' / 'params_final.csv'}")
-         print(f"2013a-compatible parameter table: {outdir / current_dir / 'fitted_model_params.csv'}")
+         ohct_fig.savefig(
+            outdir / current_dir / results / "png" / "4xCO2_all_models_ohc_ts.png",
+            dpi=200,
+            bbox_inches="tight",
+         )
+         ohct_fig.savefig(
+            outdir / current_dir / results / "pdf" / "4xCO2_all_models_ohc_ts.pdf",
+            bbox_inches="tight",
+         )
+         plt.close(ohct_fig)
+
+      print("Finished final val/result plots")
+      print("Done.")
+      print(f"Final parameter table: {outdir / current_dir / 'tables' / 'params_final.csv'}")
+      print(f"2013a-compatible parameter table: {outdir / current_dir / 'fitted_model_params.csv'}")
