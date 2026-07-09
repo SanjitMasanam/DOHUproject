@@ -308,10 +308,10 @@ for run_type in [3, 1]:
                      return 1-erfcx(x/D * (lmbda**2)/(((1025)*(3993))**2))
 
                   def fit_func_ode(x, tau):
-                     return 1-np.exp(x/tau)
+                     return 1-np.exp(-x/tau)
 
                   if results == "validation" and run_type == 1: 
-                     fit_T = t2m[:151]/T_eq
+                     fit_T = t2m[:20]/T_eq
                      plot_T = t2m[:151]/T_eq
                      fit_t = np.arange(1, 1 + fit_T.shape[0], 1)
                      plot_t = np.arange(1, 1 + plot_T.shape[0], 1)
@@ -321,7 +321,7 @@ for run_type in [3, 1]:
                      fit_t = np.arange(1, 1 + fit_T.shape[0], 1)
                      plot_t = np.arange(300, 300 + plot_T.shape[0], 1)
                   if results == "unblinded" and run_type == 1: 
-                     fit_T = t2m[:151]/T_eq
+                     fit_T = t2m[:20]/T_eq
                      plot_T = t2m/T_eq
                      fit_t = np.arange(1, 1 + fit_T.shape[0], 1)
                      plot_t = np.arange(1, 1 + plot_T.shape[0], 1)
@@ -339,7 +339,7 @@ for run_type in [3, 1]:
                   D = popt[0]
                   D_unc = perr[0]
 
-                  popt, pcov = curve_fit(fit_func_ode, fit_t, fit_T, p0=[5*10**(-5)])
+                  popt, pcov = curve_fit(fit_func_ode, fit_t, fit_T)
                   perr = np.sqrt(np.diag(pcov))
                   print(popt, perr)
 
@@ -379,7 +379,7 @@ for run_type in [3, 1]:
                   ax.scatter(plot_t, T_eq*plot_T, s=4, color="red")
                   ax.plot(plot_t, T_eq*plot_T, color="red", label="2-m Surface Temp.")
                   ax.plot(plot_t, T_eq*fit_func_diff(plot_t, D), color="blue", label="Diffusive Fit")
-                  ax.plot(plot_t, T_eq*fit_func_ode(plot_t, tau), color="blue", label="ODE Fit")
+                  ax.plot(plot_t, T_eq*fit_func_ode(plot_t, tau), color="green", label="ODE Fit")
 
                   # Add the slow-timescale parameter and a reference line at 150 years.
                   ax.text(

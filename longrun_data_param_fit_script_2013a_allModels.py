@@ -9,10 +9,68 @@ from pathlib import Path
 import sympy as sp
 from matplotlib.lines import Line2D
 from tqdm import tqdm
+from matplotlib.ticker import MultipleLocator
 
-# lin = True
-# run_type = 2
-# results = "validation"
+def format_ax(ax, title="", xlabel="", ylabel="", text="",
+            xscale="linear", yscale="linear",
+            xlim=None, ylim=None,
+            xticks=None, yticks=None,
+            xspacing=True, yspacing=True,
+            legend=True, grid=True):
+
+   ax.set(title=title, xlabel=xlabel, ylabel=ylabel,
+         xscale=xscale, yscale=yscale,
+         xlim=xlim, ylim=ylim)
+
+   if text:
+      ax.text(0.02, 0.98, text, transform=ax.transAxes, weight='bold',
+               fontsize=15, va="top", ha="left")
+
+   if xticks is not None: ax.set_xticks(xticks)
+   if yticks is not None: ax.set_yticks(yticks)
+   # if xspacing: ax.xaxis.set_major_locator(MultipleLocator(xspacing))
+   # if yspacing: ax.yaxis.set_minor_locator(MultipleLocator(yspacing))
+
+   ax.tick_params(labelsize=14, width=2, length=8, direction="in")
+   if grid: ax.grid(alpha=0.3)
+   if legend: ax.legend(fontsize=10, loc='upper right')
+
+def make_model_grid(
+   models,
+   width_per_ax=6,
+   height_per_ax=6,
+   dpi=None,
+   title=None,
+   xlabel=None,
+   ylabel=None,
+):
+   nmodels = len(models)
+   if nmodels % 2 != 0:
+      raise ValueError(f"Expected an even number of models, got {nmodels}.")
+
+   ncols, nrows = 4, 2
+
+   fig, axs = plt.subplots(
+      nrows,
+      ncols,
+      figsize=(width_per_ax * ncols, height_per_ax * nrows),
+      dpi=dpi,
+      constrained_layout=True,
+   )
+
+   fig.subplots_adjust(left=0.05, bottom=0.075, top=0.95)
+
+   if title:
+      fig.suptitle(title, fontsize=20, fontweight="bold")
+
+   if xlabel:
+      fig.text(0.5, 0.02, xlabel, ha='center', fontsize=18, fontweight="bold")
+
+   if ylabel:
+      fig.text(0.02, 0.5, ylabel, ha='center', va='center', fontsize=18, fontweight="bold", rotation=90.)
+
+   return fig, np.asarray(axs).ravel()
+
 
 for run_type in [3, 2, 1]:
    for results in ["unblinded", "validation"]:
@@ -46,28 +104,6 @@ for run_type in [3, 2, 1]:
                deriv_val = float(deriv.evalf(subs=values))
                variance += (deriv_val * unc) ** 2
             return float(np.sqrt(variance))
-
-
-         def make_model_grid(models, width_per_ax=7, height_per_ax=5, dpi=None):
-            """Create a dynamic 2-column grid with one subplot per model.
-
-            Assumes an even number of models, as requested.
-            """
-            nmodels = len(models)
-            if nmodels % 2 != 0:
-               raise ValueError(f"Expected an even number of models, got {nmodels}.")
-
-            ncols = 4
-            nrows = 2
-            fig, axs = plt.subplots(
-               nrows,
-               ncols,
-               figsize=(width_per_ax * ncols, height_per_ax * nrows),
-               dpi=dpi,
-               constrained_layout=True,
-            )
-            return fig, np.asarray(axs).ravel()
-
 
          def ensure_dirs(outdir, current_dir, sections):
             for section in sections:
@@ -151,25 +187,25 @@ for run_type in [3, 2, 1]:
 
          # Create shared figures for the 4xCO2 experiment and a 10-panel Net TOA layout
          for expt in ['4xCO2']:
-            step1_figs[expt], step1_axs[expt] = make_model_grid(models, width_per_ax=7, height_per_ax=5)
+            step1_figs[expt], step1_axs[expt] = make_model_grid(models, title=r"4xCO$_{2}$ Net TOA vs T$_{2M}$", xlabel="2-meter Air Temperature Anomaly (K)", ylabel=r"Net TOA Radiative Flux Anomaly ($W*m^{-2}$)")
             step1_idx[expt] = 0
 
-            step2_figs[expt], step2_axs[expt] = make_model_grid(models, width_per_ax=7, height_per_ax=5)
+            step2_figs[expt], step2_axs[expt] = make_model_grid(models, title=r"4xCO$_{2}$ log(T$_{eq}$-T) - log(T$_{eq}$) vs. Time", xlabel=r"Time (years)", ylabel=r"log($T_{eq}$-T)-log($T_{eq}$)")
             step2_idx[expt] = 0
 
-            final_figs[expt], final_axs[expt] = make_model_grid(models, width_per_ax=10.8, height_per_ax=7.2, dpi=120)
+            final_figs[expt], final_axs[expt] = make_model_grid(models, dpi=120)
             final_idx[expt] = 0
 
-            nettoa_figs[expt], nettoa_axs[expt] = make_model_grid(models, width_per_ax=7, height_per_ax=5)
+            nettoa_figs[expt], nettoa_axs[expt] = make_model_grid(models)
             nettoa_idx[expt] = 0
             
-            tau_s_figs[expt], tau_s_axs[expt] = make_model_grid(models, width_per_ax=6, height_per_ax=6)
+            tau_s_figs[expt], tau_s_axs[expt] = make_model_grid(models, title=r"4xCO$_{2}$ $\tau_s$ vs. Calibration Time", xlabel=r"Calibration Time (years)", ylabel=r"$\tau_s$ (years)")
             tau_s_idx[expt] = 0
             
-            ohc_ts_figs[expt], ohc_ts_axs[expt] = make_model_grid(models, width_per_ax=6, height_per_ax=6)
+            ohc_ts_figs[expt], ohc_ts_axs[expt] = make_model_grid(models)#, title=r"4xCO$_2$ OHU vs. Surface Temp (Normalized)", xlabel=r"$\frac{T_s}{2\, \mathrm{ECS}}$", ylabel=r"$\frac{\mathrm{OHC}}{\mathrm{OHC}_{eq}}$")
             ohc_ts_idx[expt] = 0
 
-            assmpt_figs[expt], assmpt_axs[expt] = make_model_grid(models, width_per_ax=6, height_per_ax=6)
+            assmpt_figs[expt], assmpt_axs[expt] = make_model_grid(models)
             assmpt_idx[expt] = 0
 
          # ----------------- STEP 1 ---------------------
@@ -245,11 +281,7 @@ for run_type in [3, 2, 1]:
                      fontsize=8,
                   )
 
-                  ax.set_xlabel("2-meter Air Temperature Anomaly (K)")
-                  ax.set_ylabel(r"Net TOA Radiative Flux Anomaly ($W*m^{-2}$)")
-                  ax.set_title(f"{model} {expt}: Net TOA vs T2M")
-                  ax.grid(True)
-                  ax.legend(fontsize=8)
+                  format_ax(ax, text=f"{model}", xscale="linear", yscale="linear")
                   step1_idx[expt] += 1
 
                   # Define symbolic expressions for uncertainty propagation
@@ -377,11 +409,7 @@ for run_type in [3, 2, 1]:
                      ax.scatter(151, tau_s_runType1, s=14, color='red', label=r'Geoffroy 2013a')
                      ax.scatter(151, tau_s_runType2, s=14, color='yellow', label=r'50-yr Avg T$_eq$')
                      ax.scatter(t2m.shape[0], tau_s_runType3, s=14, color='green', label=r'50-yr Avg + LR Fit')
-                     ax.set_xlabel(r"Calibration Time (years)")
-                     ax.set_ylabel(r"$\tau_s$ (years)")
-                     ax.set_title(f"{model} {expt}: tau_s vs. Calibration Time")
-                     ax.grid(True)
-                     ax.legend(fontsize=8, loc='upper left')
+                     format_ax(ax, text=f"{model}", xscale="linear", yscale="linear")
                      tau_s_idx[expt] += 1
 
                   # Fit step 2
@@ -402,6 +430,7 @@ for run_type in [3, 2, 1]:
                   ax = step2_axs[expt][step2_idx[expt]]
                   ax.scatter(t, y, s=8, alpha=0.5, label="Data")
                   ax.plot(xfit, yfit, linewidth=2, label=f"Fit: log(a_s)={b:.3f}, -1/t_s={m:.3f}")
+                  format_ax(ax, text=f"{model}", xscale="linear", yscale="linear", xspacing=False, yspacing=False)
                   ax.text(
                      0.475,
                      0.9775,
@@ -410,11 +439,6 @@ for run_type in [3, 2, 1]:
                      va="top",
                      fontsize=8,
                   )
-                  ax.set_xlabel(r"Time (years)")
-                  ax.set_ylabel(r"log($T_{eq}$-T)-log($T_{eq}$)")
-                  ax.set_title(f"{model} {expt}: log(T_eq-T) - log(T_eq) vs. Time")
-                  ax.grid(True)
-                  ax.legend(fontsize=8)
                   step2_idx[expt] += 1
 
                   # Compute 2-box parameters and save them
@@ -617,10 +641,7 @@ for run_type in [3, 2, 1]:
 
             one_to_one = np.arange(min(tmp_mu_SN_list), max(tmp_mu_SN_list) + 0.001, 0.001)
             ax.plot(one_to_one, one_to_one, "k--", label=r"$\mu_{\rm GF}=\mu_{\rm SN}$")
-            ax.set_xlabel(r"$\mu_{\rm SN}$")
-            ax.set_ylabel(r"$\mu_{\rm GF}$")
-            ax.set_title(f"{var}: Geoffroy vs. Sanjit/Nadir (w/ 95% CI)")
-            ax.tick_params(axis="x", rotation=45)
+            format_ax(ax, title=f"{expt} Geoffroy vs. Sanjit/Nadir (w/ 95% CI)", xlabel=r"$\mu_{\rm SN}$", ylabel=r"$\mu_{\rm GF}$", text=f"{var}", xscale="linear", yscale="linear", legend=False)
             ax.legend(handles=handles, fontsize=8)
 
          for ax in axs_val[nvars:]:
@@ -714,12 +735,9 @@ for run_type in [3, 2, 1]:
                      ax.plot(t_val, (t_val-A)/(1-A), ls='--', color='black', label='2-box Asymptotic Pred.')
                      ax.plot(T_ohc/T_eq,normalized_OHC_pred/T_eq, color='green', label=f'Fitted 2-Box Pred.')
                      ax.set_ylim(-0.05, 1.2)
+                     #format_ax(ax, text=f"{model}", xscale="linear", yscale="linear")
                      ax.axvline(1.0, color="0.55", ls='--', lw=0.8)
                      ax.axvline(A, color="0.55", ls='--', lw=0.8)
-                     ax.set_title(f"{model} {expt}:OHU vs. Surface Temp (Normalized)")
-                     ax.set_xlabel(r"$\frac{T_s}{2\, \mathrm{ECS}}$")
-                     ax.set_ylabel(r"$\frac{\mathrm{OHC}}{\mathrm{OHC}_{eq}}$")
-                     ax.legend(fontsize=8, loc='upper left')
                      ohc_ts_idx[expt] += 1
 
                   # Draw observed and fitted temperature curves
