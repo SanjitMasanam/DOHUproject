@@ -14,7 +14,7 @@ from scipy.optimize import curve_fit
 from pde_solver_1lyrEBM_diffusive import Params as PDEParams, solve_model as pde_solve_model, YEAR
 
 for run_type in [3, 1]:
-   for results in ["validation"]:#, "unblinded"]:
+   for results in ["unblinded"]:
       dir_list = [
          "replicate_results",
          "N/A",
