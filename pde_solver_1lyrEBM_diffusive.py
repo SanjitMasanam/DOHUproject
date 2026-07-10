@@ -91,7 +91,7 @@ except ImportError:
 YEAR = 365.25 * 24 * 3600.0          # seconds per year
 CM2S_TO_M2S = 1.0e-4                 # 1 cm^2/s = 1e-4 m^2/s (paper quotes k in cm^2/s)
 
-OUTDIR = "1lyEBM_diffusive"          # all figures go here (created below)
+OUTDIR = "1lyrEBM_diffusive"          # all figures go here (created below)
 
 # Fixed-order categorical palette (colorblind-safe subset of Okabe-Ito,
 # validated for CVD separation). Assigned by entity, never cycled.

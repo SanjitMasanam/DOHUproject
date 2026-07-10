@@ -11,6 +11,7 @@ from matplotlib.lines import Line2D
 from tqdm import tqdm
 from scipy.special import erfcx
 from scipy.optimize import curve_fit
+from pde_solver_1lyrEBM_diffusive import Params as PDEParams, solve_model as pde_solve_model, YEAR
 
 for run_type in [3, 1]:
    for results in ["validation"]:#, "unblinded"]:
@@ -389,7 +390,38 @@ for run_type in [3, 1]:
 
                tau = popt[0]
                tau_unc = perr[0]
-                  
+
+               # Solve the 1-layer EBM + diffusive thermocline PDE, using
+               # F_ref/lambda/T_eq already fit above and treating the
+               # thermocline diffusivity kappa AND the mixed-layer depth
+               # h_ml (i.e. its heat capacity, c_ml = rho_cp*h_ml) as free
+               # parameters.
+               t_final_years = max(fit_t.max(), plot_t.max())
+
+               def make_pde_dT(F_ref_, T_eq_, t_final_yrs_):
+                  def pde_dT(t_years, kappa, h_ml):
+                     z_max = min(4000.0, max(2700.0, 6.0 * np.sqrt(kappa * t_final_yrs_ * YEAR)))
+                     nz = int(min(401, max(121, z_max / 15.0 + 1)))
+                     pde_p = PDEParams(
+                        kappa=kappa, h_ml=h_ml, dT_eq=T_eq_, F0=F_ref_,
+                        z_max=z_max, Nz=nz, t_final=t_final_yrs_ * YEAR,
+                     )
+                     sol = pde_solve_model(pde_p, n_save=250)
+                     return np.interp(t_years, sol["t"] / YEAR, sol["dT"])
+                  return pde_dT
+
+               pde_dT_func = make_pde_dT(F_ref, T_eq, t_final_years)
+               popt, pcov = curve_fit(
+                  pde_dT_func, fit_t, fit_T * T_eq,
+                  p0=[1.0e-4, 110.0], bounds=([1e-7, 5.0], [1e-3, 2000.0]), max_nfev=60,
+               )
+               perr = np.sqrt(np.diag(pcov))
+               print(popt, perr)
+
+               kappa_pde, h_ml_pde = popt
+               kappa_pde_unc, h_ml_pde_unc = perr
+               pde_T = pde_dT_func(plot_t, kappa_pde, h_ml_pde) / T_eq
+
                # # Plot OHC vs. T_s
                # if results == 'unblinded':
                #    T_ohc = T_eq * (a_f * (1 - np.exp(-np.arange(1, 1 + 100000, 1) / tau_f)) + a_s * (1 - np.exp(-np.arange(1, 1 + 100000, 1) / tau_s)))
@@ -424,12 +456,13 @@ for run_type in [3, 1]:
                ax.plot(plot_t, T_eq*plot_T, color="red", label="2-m Surface Temp.")
                ax.plot(plot_t, T_eq*fit_func_diff(plot_t, D), color="blue", label="Diffusive Fit")
                ax.plot(plot_t, T_eq*fit_func_ode(plot_t, tau), color="green", label="ODE Fit")
+               ax.plot(plot_t, T_eq*pde_T, color="purple", label="PDE Solver Fit")
 
                # Add the slow-timescale parameter and a reference line at 150 years.
                ax.text(
                   0.02,
                   0.88,
-                  rf"D = {D:.2e} $m^2/s$",
+                  rf"D = {D:.2e} $m^2/s$" + "\n" + rf"$\kappa$ = {kappa_pde:.2e} $m^2/s$, $h_{{ml}}$ = {h_ml_pde:.0f} m",
                   transform=ax.transAxes,
                   va="top",
                   ha="left",

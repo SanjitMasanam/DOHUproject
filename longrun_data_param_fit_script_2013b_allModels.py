@@ -75,6 +75,13 @@ for run_type in [1, 2, 3]:
       print(f"Current Dir: {current_dir}\nType of output: {results}")
       print("==================================")
 
+      extra_text = {
+         1: "",
+         2: "50yrAvg",
+         3: "50yrAvg_LRparamFit",
+      }[run_type]
+      run_type_suffix = f"_{extra_text}" if extra_text else ""
+
 
       # ------------------------- Data structures -------------------------
 
@@ -172,6 +179,8 @@ for run_type in [1, 2, 3]:
          right=0.98,
          wspace=0.12,
          hspace=0.18,
+         sharex=False,
+         sharey=False,
       ):
          nmodels = len(models)
          if nmodels % 2 != 0:
@@ -184,6 +193,8 @@ for run_type in [1, 2, 3]:
             ncols,
             figsize=(width_per_ax * ncols, height_per_ax * nrows),
             dpi=dpi,
+            sharex=sharex,
+            sharey=sharey,
             constrained_layout=False,
          )
 
@@ -815,6 +826,9 @@ for run_type in [1, 2, 3]:
 
       # Final parameter table.
       df.to_csv(outdir / current_dir / "tables" / "params_final.csv", index=False)
+      # 2013a-compatible location, so the tau_s-vs-calibration-time plot below
+      # can cross-reference tau_s from the other two run_types' results.
+      df.to_csv(outdir / current_dir / "fitted_model_params.csv", index=False)
       print(df)
 
       # ------------------------- Compare parameters to paper values -------------------------
@@ -1071,6 +1085,13 @@ for run_type in [1, 2, 3]:
          xlabel="Time (years)", ylabel=r"Net TOA (10 yr rolling mean, $W\,m^{-2}$)",
       )
 
+      tau_s_fig, tau_s_axs = make_model_grid(
+         models,
+         title=r"4xCO$_{2}$ $\tau_s$ vs. Calibration Time",
+         xlabel=r"Calibration Time (years)", ylabel=r"$\tau_s$ (years)",
+         sharex=True, sharey=True,
+      )
+
       # These two are only populated/saved for unblinded runs, matching 2013a_allModels.py.
       ohct_fig = None
       ohct_axs = None
@@ -1171,6 +1192,64 @@ for run_type in [1, 2, 3]:
          ax2.set_ylim(y_bottom / T_eq, y_top / T_eq)
          ax2.set_yticks(ratio_ticks)
          ax2.tick_params(labelsize=14, width=2, length=8, direction="in")
+
+         # ----------------- tau_s vs. calibration length plot -----------------
+         # Only meaningful for run_type == 3 (50-yr avg + LR param fit), where we
+         # re-derive tau_s using progressively longer chunks of the raw record to
+         # see how the slow-mode estimate depends on run length. Mirrors the
+         # (approximate, non-iterative) Gregory + slow-mode fit used in the
+         # 2013a script's equivalent plot.
+         if run_type == 3:
+            model_data_raw = data.rx2(model)
+            T_ctrl_raw = get_r_array(model_data_raw, "piControl", "T2M")
+            N_ctrl_raw = get_r_array(model_data_raw, "piControl", "NETTOA")
+            T_4x_raw = get_r_array(model_data_raw, "4xCO2", "T2M")
+            N_4x_raw = get_r_array(model_data_raw, "4xCO2", "NETTOA")
+            T_base_full = float(np.nanmean(T_ctrl_raw))
+            N_base_full = float(np.nanmean(N_ctrl_raw))
+
+            cal_lengths = np.arange(151, len(T_4x_raw), 1)
+            tau_s_lst = []
+            for i in cal_lengths:
+               t2m_tauRun = T_4x_raw[:i] - T_base_full
+               nettoa_tauRun = N_4x_raw[:i] - N_base_full
+               t_tauRun = np.arange(0, t2m_tauRun.shape[0], 1)
+
+               [m_step1, b_step1] = np.polyfit(t2m_tauRun, nettoa_tauRun, 1)
+               T_eq_tauRun = b_step1 / (-m_step1)
+
+               mask_tauRun = (T_eq_tauRun - t2m_tauRun) > 0
+               t_tauRun = t_tauRun[mask_tauRun]
+               t2m_tauRun = t2m_tauRun[mask_tauRun]
+
+               y_tauRun = np.log(T_eq_tauRun - t2m_tauRun[30:]) - np.log(T_eq_tauRun)
+               [m_slope, b_slope] = np.polyfit(t_tauRun[30:], y_tauRun, 1)
+               tau_s_lst.append(-1 / m_slope)
+
+            ax = tau_s_axs[imodel]
+            ax.plot(cal_lengths, tau_s_lst)
+            # Only extends to this model's own last data point, so the line's
+            # length visually encodes how long each model's run was.
+            ax.plot(cal_lengths, cal_lengths, label='y=x', color='black')
+
+            fitted_params_path1 = outdir / dir_list[0] / "fitted_model_params.csv"
+            fitted_params_path2 = outdir / dir_list[1] / "fitted_model_params.csv"
+            fitted_params_path3 = outdir / dir_list[2] / "fitted_model_params.csv"
+
+            if fitted_params_path1.is_file() and fitted_params_path2.is_file() and fitted_params_path3.is_file():
+               df_runType1 = pd.read_csv(fitted_params_path1)
+               df_runType2 = pd.read_csv(fitted_params_path2)
+               df_runType3 = pd.read_csv(fitted_params_path3)
+
+               tau_s_runType1 = df_runType1.loc[df_runType1['model'] == model, "tau_s"].iloc[0]
+               tau_s_runType2 = df_runType2.loc[df_runType2['model'] == model, "tau_s"].iloc[0]
+               tau_s_runType3 = df_runType3.loc[df_runType3['model'] == model, "tau_s"].iloc[0]
+
+               ax.scatter(151, tau_s_runType1, s=14, color='red', label=r'Geoffroy 2013b')
+               ax.scatter(151, tau_s_runType2, s=14, color='yellow', label=r'50-yr Avg T$_{eq}$')
+               ax.scatter(len(T_4x_raw), tau_s_runType3, s=14, color='green', label=r'50-yr Avg + LR Fit')
+
+            format_ax(ax, text=model, xscale="linear", yscale="linear", legend_loc='lower right')
 
          # ----------------- NETTOA time-series plot -----------------
          T_obs_roll = rolling_mean(T_obs, window=10)
@@ -1288,6 +1367,30 @@ for run_type in [1, 2, 3]:
 
       plt.close(final_fig)
       plt.close(nettoa_fig)
+
+      # Explicitly span every panel to the full extent of all plotted data
+      # (across all models) rather than relying on sharex/sharey autoscale,
+      # so the longest run's data is never clipped in any panel.
+      populated_axs = [ax for ax in tau_s_axs if ax.has_data()]
+      if populated_axs:
+         xmin = min(ax.dataLim.intervalx[0] for ax in populated_axs)
+         xmax = max(ax.dataLim.intervalx[1] for ax in populated_axs)
+         ymin = min(ax.dataLim.intervaly[0] for ax in populated_axs)
+         ymax = max(ax.dataLim.intervaly[1] for ax in populated_axs)
+         for ax in tau_s_axs:
+            ax.set_xlim(xmin, xmax)
+            ax.set_ylim(ymin, ymax)
+
+      tau_s_fig.savefig(
+         outdir / current_dir / "step2" / "png" / f"4xCO2_all_models_tau_s_vs_calibration_t{run_type_suffix}.png",
+         dpi=200,
+         bbox_inches="tight",
+      )
+      tau_s_fig.savefig(
+         outdir / current_dir / "step2" / "pdf" / f"4xCO2_all_models_tau_s_vs_calibration_t{run_type_suffix}.pdf",
+         bbox_inches="tight",
+      )
+      plt.close(tau_s_fig)
 
       if results == "unblinded":
          assmpt_fig.savefig(

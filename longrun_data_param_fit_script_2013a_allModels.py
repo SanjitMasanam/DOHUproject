@@ -49,6 +49,8 @@ def make_model_grid(
    right=0.98,
    wspace=0.12,
    hspace=0.18,
+   sharex=False,
+   sharey=False,
 ):
    nmodels = len(models)
    if nmodels % 2 != 0:
@@ -61,6 +63,8 @@ def make_model_grid(
       ncols,
       figsize=(width_per_ax * ncols, height_per_ax * nrows),
       dpi=dpi,
+      sharex=sharex,
+      sharey=sharey,
       constrained_layout=False,
    )
 
@@ -207,7 +211,7 @@ for run_type in [3, 2, 1]:
          nettoa_figs[expt], nettoa_axs[expt] = make_model_grid(models, title=r"4xCO$_{2}$ Net TOA vs. Time", xlabel="Time (years)", ylabel=r"Net TOA (10 yr rolling mean, $W\,m^{-2}$)")
          nettoa_idx[expt] = 0
 
-         tau_s_figs[expt], tau_s_axs[expt] = make_model_grid(models, title=r"4xCO$_{2}$ $\tau_s$ vs. Calibration Time", xlabel=r"Calibration Time (years)", ylabel=r"$\tau_s$ (years)")
+         tau_s_figs[expt], tau_s_axs[expt] = make_model_grid(models, title=r"4xCO$_{2}$ $\tau_s$ vs. Calibration Time", xlabel=r"Calibration Time (years)", ylabel=r"$\tau_s$ (years)", sharex=True, sharey=True)
          tau_s_idx[expt] = 0
 
          ohc_ts_figs[expt], ohc_ts_axs[expt] = make_model_grid(models, title=r"4xCO$_2$ OHU vs. Surface Temp (Normalized)", xlabel=r"$T_s/2\, \mathrm{ECS}$", ylabel=r"$\mathrm{OHC}/\mathrm{OHC}_{eq}$")
@@ -424,10 +428,10 @@ for run_type in [3, 2, 1]:
                      tau_s_runType3 = df_runType3.loc[df['model'] == model, "tau_s"].iloc[0]
 
                      ax.scatter(151, tau_s_runType1, s=14, color='red', label=r'Geoffroy 2013a')
-                     ax.scatter(151, tau_s_runType2, s=14, color='yellow', label=r'50-yr Avg T$_eq$')
+                     ax.scatter(151, tau_s_runType2, s=14, color='yellow', label=r'50-yr Avg T$_{eq}$')
                      ax.scatter(t2m.shape[0], tau_s_runType3, s=14, color='green', label=r'50-yr Avg + LR Fit')
 
-                  format_ax(ax, text=f"{model}", xscale="linear", yscale="linear", legend_loc='lower right')
+                  format_ax(ax, text=f"{model}", xscale="linear", yscale="linear", legend_loc='upper right')
                   tau_s_idx[expt] += 1
 
                # Fit step 2
@@ -540,7 +544,20 @@ for run_type in [3, 2, 1]:
             bbox_inches="tight",
          )
          plt.close(step2_figs[expt])
-            
+
+         # Explicitly span every panel to the full extent of all plotted data
+         # (across all models) rather than relying on sharex/sharey autoscale,
+         # so the longest run's data is never clipped in any panel.
+         populated_axs = [ax for ax in tau_s_axs[expt] if ax.has_data()]
+         if populated_axs:
+            xmin = min(ax.dataLim.intervalx[0] for ax in populated_axs)
+            xmax = max(ax.dataLim.intervalx[1] for ax in populated_axs)
+            ymin = min(ax.dataLim.intervaly[0] for ax in populated_axs)
+            ymax = max(ax.dataLim.intervaly[1] for ax in populated_axs)
+            for ax in tau_s_axs[expt]:
+               ax.set_xlim(xmin, xmax + 100)
+               ax.set_ylim(ymin, ymax + 100)
+
          tau_s_figs[expt].savefig(
             outdir / current_dir / "step2" / "png" / f"{expt}_all_models_tau_s_vs_calibration_t{suffix}.png",
             dpi=200,
