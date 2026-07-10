@@ -356,7 +356,7 @@ for run_type in [3, 1]:
                   return 1-np.exp(-x/tau)
 
                if results == "validation" and run_type == 1: 
-                  fit_T = t2m[:20]/T_eq
+                  fit_T = t2m[:151]/T_eq
                   plot_T = t2m[:151]/T_eq
                   fit_t = np.arange(1, 1 + fit_T.shape[0], 1)
                   plot_t = np.arange(1, 1 + plot_T.shape[0], 1)
@@ -366,7 +366,7 @@ for run_type in [3, 1]:
                   fit_t = np.arange(1, 1 + fit_T.shape[0], 1)
                   plot_t = np.arange(300, 300 + plot_T.shape[0], 1)
                if results == "unblinded" and run_type == 1: 
-                  fit_T = t2m[:20]/T_eq
+                  fit_T = t2m[:151]/T_eq
                   plot_T = t2m/T_eq
                   fit_t = np.arange(1, 1 + fit_T.shape[0], 1)
                   plot_t = np.arange(1, 1 + plot_T.shape[0], 1)
