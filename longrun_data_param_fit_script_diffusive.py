@@ -264,7 +264,7 @@ for run_type in [3, 1]:
                rmse = np.sqrt(np.mean((nettoa - y_pred) ** 2))
                ax.text(
                   0.02,
-                  0.88,
+                  0.92,
                   f"$R^2$={r2:.3f}\nRMSE={rmse:.3f}",
                   transform=ax.transAxes,
                   va="top",
@@ -349,8 +349,8 @@ for run_type in [3, 1]:
                T_eq = df.loc[df["model"] == model, "T_eq"].iloc[0]
                T_eq_unc = df.loc[df["model"] == model, "T_eq_unc"].iloc[0]
 
-               def fit_func_diff(x, D):
-                  return 1-erfcx(x/D * (lmbda**2)/(((1025)*(3993))**2))
+               def fit_func_diff(x, T):
+                  return 1-erfcx(x/T)
 
                def fit_func_ode(x, tau):
                   return 1-np.exp(-x/tau)
@@ -377,12 +377,12 @@ for run_type in [3, 1]:
                   plot_t = np.arange(1, 1 + plot_T.shape[0], 1)
 
                # Compute the fitted temperature curve & nettoa/OHC
-               popt, pcov = curve_fit(fit_func_diff, fit_t, fit_T, p0=[5*10**(-5)])
+               popt, pcov = curve_fit(fit_func_diff, fit_t, fit_T)
                perr = np.sqrt(np.diag(pcov))
                print(popt, perr)
 
-               D = popt[0]
-               D_unc = perr[0]
+               T = popt[0]
+               T_unc = perr[0]
 
                popt, pcov = curve_fit(fit_func_ode, fit_t, fit_T)
                perr = np.sqrt(np.diag(pcov))
@@ -454,19 +454,22 @@ for run_type in [3, 1]:
                ax = final_axs[expt][final_idx[expt]]
                ax.scatter(plot_t, T_eq*plot_T, s=4, color="red")
                ax.plot(plot_t, T_eq*plot_T, color="red", label="2-m Surface Temp.")
-               ax.plot(plot_t, T_eq*fit_func_diff(plot_t, D), color="blue", label="Diffusive Fit")
-               ax.plot(plot_t, T_eq*fit_func_ode(plot_t, tau), color="green", label="ODE Fit")
-               ax.plot(plot_t, T_eq*pde_T, color="purple", label="PDE Solver Fit")
+               ax.plot(plot_t, T_eq*fit_func_ode(plot_t, tau), color="green", label="1-Box Fit")
+               ax.plot(plot_t, T_eq*fit_func_diff(plot_t, T), color="blue", label="Diffusive Fit")
+               ax.plot(plot_t, T_eq*pde_T, color="purple", label="1-Box + Diffusion Fit")
+
+               D = T * 31536000 * (lmbda/((10**3)*(4.22*10**3))**2)
 
                # Add the slow-timescale parameter and a reference line at 150 years.
                ax.text(
                   0.02,
-                  0.88,
-                  rf"D = {D:.2e} $m^2/s$" + "\n" + rf"$\kappa$ = {kappa_pde:.2e} $m^2/s$, $h_{{ml}}$ = {h_ml_pde:.0f} m",
+                  0.92,
+                  rf"$\tau_{{1b}}$ = {tau:.0f} yrs" + "\n" + rf"T$_d$ = {T:.0f} yrs, D$_d$ =  {D:.2e} m^2/s" + "\n" + rf"$\kappa_{{1b+d}}$ = {kappa_pde:.2e} m^2/s, h$_{{ml}}$ = {h_ml_pde:.0f} m",
                   transform=ax.transAxes,
                   va="top",
                   ha="left",
                   fontsize=8,
+                  weight="bold",
                   bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4),
                )
                ax.axvline(151, color="orange", linestyle=":", linewidth=1, alpha=0.7)
@@ -514,7 +517,16 @@ for run_type in [3, 1]:
                ax.set_xscale(scale)
                ax.set_xlim(1, xmax + 1)
                if scale == "linear":
-                  ax.set_xticks(np.linspace(1, xmax + 1, 5))
+                  # Add a highlighted "150" tick at the orange reference line
+                  # (drawn at x=151) alongside the usual evenly-spaced ticks.
+                  base_ticks = np.linspace(1, xmax + 1, 5)
+                  all_ticks = sorted(set(base_ticks.tolist()) | {151.0})
+                  ax.set_xticks(all_ticks)
+                  ax.set_xticklabels(["150" if abs(tv - 151.0) < 1e-9 else f"{tv:.0f}" for tv in all_ticks])
+                  for tick_val, label in zip(all_ticks, ax.get_xticklabels()):
+                     if abs(tick_val - 151.0) < 1e-9:
+                        label.set_color("orange")
+                        label.set_fontsize(10)
                else:
                   ax.xaxis.set_major_locator(mpl.ticker.LogLocator())
 
