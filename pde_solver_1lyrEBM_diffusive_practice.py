@@ -7,6 +7,7 @@ import os
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
 from dataclasses import dataclass, replace
 from scipy.integrate import solve_ivp
 from scipy.sparse import diags
@@ -30,36 +31,36 @@ C_BLUE, C_VERM, C_GREEN, C_ORANGE, C_PINK = (
 
 @dataclass(frozen=True)
 class Params:
-    #
-    #
-    kappa: float = 1.0 * CM2S_TO_M2S
-    h_ml: float = 110.0
-    dT_eq: float = 4.2
-    F0: float = 4.3
-    rho_cp: float = 4.186e6
-    z_max: float = 2700.0
-    Nz: int = 241
+    # These are fixed parameters
+    # that match what was used in Hansen 1984
+    kappa: float = 1.0 * CM2S_TO_M2S # Diffusivity
+    h_ml: float = 110.0 # height of mixed layer
+    dT_eq: float = 4.2 # T equil
+    F0: float = 4.3 # Forcing for 2xCO2
+    rho_cp: float = 4.186e6 # vol. heat capacity of seawater
+    z_max: float = 2700.0 
+    Nz: int = 241 # Number of Z levels
     t_final: float = 35.0 * YEAR
 
     @property
     def c_ml(self):
-        #
+        # Calculate heat capacity of mixed layer
         return self.rho_cp * self.h_ml
 
     @property
     def lam(self):
-        #
+        # Calculate climate feedback parameter
         return self.F0 / self.dT_eq
 
     @property
     def D(self):
-        #
+        # Calculate kinematic diffusivity parameter
         return self.rho_cp * self.kappa
 
     @property
     def tau_ml(self):
-        #
-        #
+        # Calculate characterisitic response
+        # time of mixed layer (1-box model)
         return self.c_ml / self.lam
 
 
@@ -67,21 +68,19 @@ class Params:
 # Core numerics
 # =================================================================
 def make_rhs(dz, p):
-    #
-    #
+    # Function that sets up BC and PDE of interior region
     def rhs(t, u):
         du = np.empty_like(u)
-        T0 = u[0]
+        T0 = u[0] # T_0 = theta(z=0)
 
-        #
-        #
+        # Surface B.C. where 
+        # dT/dt = F - lambda * T_0 + D * dT/dz (@ z=0) / c_ml
         du[0] = (p.F0 - p.lam * T0 + p.D * (u[1] - T0) / dz) / p.c_ml
 
-        #
+        # dT/dt = kappa * d^2T/dz^2
         du[1:-1] = p.kappa * (u[2:] - 2.0 * u[1:-1] + u[:-2]) / dz**2
 
-        #
-        #
+        # dT/dt = kappa * d^2T/d^2t (@ z=zmax) = 0
         du[-1] = p.kappa * 2.0 * (u[-2] - u[-1]) / dz**2
         return du
 
@@ -89,8 +88,7 @@ def make_rhs(dz, p):
 
 
 def solve_model(p, n_save=400, rtol=1e-8, atol=1e-10):
-    #
-    #
+    # Solve PDE numerically using scipy.solve_icp
     z = np.linspace(0.0, p.z_max, p.Nz)
     dz = z[1] - z[0]
     u0 = np.zeros(p.Nz)
@@ -108,13 +106,12 @@ def solve_model(p, n_save=400, rtol=1e-8, atol=1e-10):
 
 
 def analytic_mixed_layer(t, p):
-    #
-    #
+    # Analytical solution for a 1-box (ml-only) model
     return p.dT_eq * (1.0 - np.exp(-t / p.tau_ml))
 
 
 def e_folding_time(t, dT, p):
-    #
+    # Calculate how long it takes to reach 63% of something
     target = (1.0 - np.exp(-1.0)) * p.dT_eq
     if dT[-1] < target:
         return np.nan
@@ -153,8 +150,7 @@ def style_axes(ax):
 def main():
     os.makedirs(OUTDIR, exist_ok=True)
 
-    #
-    #
+    # Print out model params used
     p = Params()
     section("MODEL PARAMETERS (defaults: 110 m mixed layer, k = 1 cm^2/s)")
     print(f"  F0      = {p.F0} W/m^2       dT_eq = {p.dT_eq} C")
@@ -164,8 +160,7 @@ def main():
     print(f"  tau_ml  = c/lam = {p.tau_ml / YEAR:.2f} yr  (isolated-slab e-folding time)")
     print(f"  grid: Nz = {p.Nz}, dz = {p.z_max / (p.Nz - 1):.2f} m, z_max = {p.z_max} m")
 
-    #
-    #
+    # Save solutions to each run to a dictionary
     runs = {
         "63 m mixed layer only":  solve_model(replace(p, h_ml=63.0, kappa=0.0)),
         "110 m mixed layer only": solve_model(replace(p, kappa=0.0)),
@@ -173,16 +168,14 @@ def main():
         "110 m + k = 2 cm$^2$/s": solve_model(replace(p, kappa=2.0 * CM2S_TO_M2S)),
     }
 
-    #
-    #
+    # Check that all runs are finite
     section("CHECK 1: solver diagnostics (k = 1 run) and finiteness (all runs)")
     s = runs["110 m + k = 1 cm$^2$/s"]["sol"]
     print(f"  success={s.success}  nfev={s.nfev}  njev={s.njev}  nlu={s.nlu}")
     all_finite = all(np.all(np.isfinite(r["theta"])) for r in runs.values())
     check("all runs finite (no NaN/Inf)", all_finite)
 
-    #
-    #
+    # Reproduce Hansen Fig. 16 using run data
     section("FIGURE: fig16_reproduction.png  +  CHECK 2: values at t = 35 yr")
     styles = {
         "63 m mixed layer only":  dict(color=C_BLUE, ls="-"),
@@ -197,12 +190,13 @@ def main():
     ax.text(19.5, p.dT_eq + 0.09, r"$\Delta T_{eq}$ = 4.2 $\degree$C", color="0.3", fontsize=9)
     ax.set(xlim=(0, 35), ylim=(0, 5), xlabel="Years",
            ylabel=r"$\Delta T$ ($\degree$C)",
-           title="Response to instant CO$_2$ doubling — Hansen et al. (1984) Fig. 16")
+           title="Response to instant CO$_2$ doubling [Hansen et al. (1984) Fig. 16]")
     style_axes(ax)
     ax.legend(loc="upper left", frameon=False, fontsize=9)
     fig.tight_layout()
     savefig(fig, "fig16_reproduction.png")
 
+    # Check if values at end of 35 years match estimates from Fig. 16
     fig16_eyeball = {
         "63 m mixed layer only":  4.10,
         "110 m mixed layer only": 3.85,
@@ -215,8 +209,7 @@ def main():
         check(f"dT(35 yr) [{name}] = {got:.2f} C vs ~{exp:.2f} C from Fig. 16",
               abs(got - exp) < 0.25, "eyeballed target, tol 0.25 C")
 
-    #
-    #
+    # Check kappa = 0 numerical solution vs. analytical solution
     section("CHECK 3: kappa = 0 numeric vs analytic slab solution")
     fig, ax = plt.subplots(figsize=(7, 4.5))
     max_err = 0.0
@@ -238,6 +231,7 @@ def main():
     fig.tight_layout()
     savefig(fig, "analytic_vs_numeric_k0.png")
 
+    # Check something about characteristic timescale
     section("CHECK 4: isolated-slab e-folding times vs paper text")
     for name, paper_val in [("63 m mixed layer only", 8.0),
                             ("110 m mixed layer only", 15.0)]:
@@ -246,8 +240,7 @@ def main():
         check(f"e-folding [{name}] = {te:.1f} yr vs paper '~{paper_val:.0f} yr'",
               abs(te - paper_val) / paper_val < 0.15, "tol 15% (paper rounds)")
 
-    #
-    #
+    # Check stated value at 102 yrs (2.65 C) which is a long run for them
     section("CHECK 5: long-run checkpoint — 2.65 C at ~102 yr (k = 1, 110 m)")
     long_run = solve_model(replace(p, t_final=150.0 * YEAR))
     te_long = e_folding_time(long_run["t"], long_run["dT"], p) / YEAR
@@ -273,9 +266,7 @@ def main():
     fig.tight_layout()
     savefig(fig, "longrun_checkpoint.png")
 
-    #
-    #
-    section("CHECK 6: e-folding time vs dT_eq (k = 1, 110 m) vs paper text")
+    # Vary sensitivity and plot affect
     sens_runs = {}
     for dte, paper_val, shade in [(2.0, 27.0, 0.45), (3.0, 55.0, 0.65), (4.2, 102.0, 0.9)]:
         r = solve_model(replace(p, dT_eq=dte, t_final=150.0 * YEAR))
@@ -300,9 +291,7 @@ def main():
     fig.tight_layout()
     savefig(fig, "sweep_sensitivity.png")
 
-    #
-    #
-    section("CHECK 7: diffusivity sweep (h = 110 m) — monotone slowdown with k")
+    # Vary diffusivity and plot effect
     k_values = [0.0, 0.5, 1.0, 2.0, 4.0]
     k_runs = [solve_model(replace(p, kappa=k * CM2S_TO_M2S)) for k in k_values]
     final_vals = [r["dT"][-1] for r in k_runs]
@@ -323,9 +312,7 @@ def main():
     fig.tight_layout()
     savefig(fig, "sweep_diffusivity.png")
 
-    #
-    #
-    section("CHECK 8: mixed-layer depth sweep (k = 1 cm^2/s)")
+    # Vary height of ml and plot effect
     h_values = [63.0, 110.0, 200.0]
     h_runs = [solve_model(replace(p, h_ml=h)) for h in h_values]
     final_vals = [r["dT"][-1] for r in h_runs]
@@ -344,36 +331,37 @@ def main():
     fig.tight_layout()
     savefig(fig, "sweep_mixed_layer_depth.png")
 
-    #
-    #
-    section("FIGURE: depth_profiles.png (k = 1 run)")
-    r = runs["110 m + k = 1 cm$^2$/s"]
-    fig, ax = plt.subplots(figsize=(5.5, 6))
-    cmap = plt.cm.Blues
-    profile_years = [1, 2, 5, 10, 20, 35]
-    for yr, shade in zip(profile_years, np.linspace(0.35, 0.95, len(profile_years))):
-        i = np.argmin(np.abs(r["t"] - yr * YEAR))
-        ax.plot(r["theta"][:, i], r["z"], color=cmap(shade), lw=2,
-                label=f"t = {yr} yr")
-    ax.set_ylim(800, 0)
+    # Plot the continuous depth-time evolution of the anomaly (rather than a
+    # handful of discrete year snapshots). Uses a long run over the full
+    # ocean depth (z_max) since the deep ocean barely responds within the
+    # original 35-yr window — a longer run is needed to see it warm at all.
+    deep_run = solve_model(replace(p, t_final=1000.0 * YEAR), n_save=500)
+    t_yr, z, theta = deep_run["t"] / YEAR, deep_run["z"], deep_run["theta"]
+    segments = [np.column_stack([theta[:, i], z]) for i in range(theta.shape[1])]
+    lc = LineCollection(segments, cmap="viridis", array=t_yr, linewidths=1.5)
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+    ax.add_collection(lc)
+    ax.set_xlim(theta.min(), theta.max() * 1.05)
+    ax.set_ylim(p.z_max, 0)
+    cbar = fig.colorbar(lc, ax=ax)
+    cbar.set_label("Years")
     ax.set(xlabel=r"$\theta$ anomaly ($\degree$C)", ylabel="Depth z (m)",
-           title="Anomaly diffusing into the thermocline\n(110 m + k = 1 cm$^2$/s)")
+           title="Continuous depth-time evolution of the thermocline anomaly\n"
+                 "(110 m + k = 1 cm$^2$/s, 1000-yr run)")
     style_axes(ax)
-    ax.legend(frameon=False, fontsize=9, loc="lower right")
     fig.tight_layout()
     savefig(fig, "depth_profiles.png")
 
-    #
-    #
-    section("CHECK 9: energy conservation + heat partition (k = 1 and k = 2)")
+    # Calculate energy conservation
     r = runs["110 m + k = 1 cm$^2$/s"]
     pp, dz, th = r["p"], r["dz"], r["theta"]
     H = (pp.c_ml * th[0]
-         + pp.rho_cp * dz * th[1:-1].sum(axis=0)
+         + pp.rho_cp * dz * th[1:-1].sum(axis=0) # Many discrete but tiny slabs to approximate continuous region
          + pp.rho_cp * (dz / 2.0) * th[-1])
-    F_net = pp.F0 - pp.lam * th[0]
-    F_int = np.concatenate([[0.0], cumulative_trapezoid(F_net, r["t"])])
-    resid = np.abs((H - H[0]) - F_int)
+    F_net = pp.F0 - pp.lam * th[0] # Flux at top of ocean vs. time
+    F_int = np.concatenate([[0.0], cumulative_trapezoid(F_net, r["t"])]) # Integrated flux at top of ocean
+    resid = np.abs((H - H[0]) - F_int) # Difference in heat uptake and energy going in (should be same)
     rel_err = resid.max() / F_int[-1]
     check(f"max |dH - Int(F dt)| / Int(F dt) = {rel_err:.2e}", rel_err < 5e-3,
           "tol 0.5%; violation would mean flux/capacity bookkeeping is inconsistent")
@@ -399,9 +387,7 @@ def main():
     fig.tight_layout()
     savefig(fig, "energy_budget.png")
 
-    #
-    #
-    section("CHECK 10: bottom BC + semi-infinite domain")
+    # Check bottom boundary condition
     uf = long_run["theta"][:, -1]
     dzl = long_run["dz"]
     grad_bot = (3 * uf[-1] - 4 * uf[-2] + uf[-3]) / (2 * dzl)
@@ -421,18 +407,14 @@ def main():
     check(f"dT(35 yr): z_max 2700 m -> {d35_full:.4f}, 1350 m -> {d35_half:.4f}",
           abs(d35_full - d35_half) / d35_full < 1e-3, "tol 0.1%")
 
-    #
-    #
-    section("CHECK 11: grid convergence (k = 1 run)")
+    # Check grid convergence (not sure what this is)
     r_fine = solve_model(replace(p, Nz=2 * p.Nz - 1))
     d35_fine = r_fine["dT"][-1]
     rel = abs(d35_fine - d35_full) / d35_fine
     check(f"dT(35 yr): Nz={p.Nz} -> {d35_full:.4f}, Nz={2*p.Nz-1} -> {d35_fine:.4f} "
           f"(rel diff {rel:.1e})", rel < 1e-2, "tol 1%")
 
-    #
-    #
-    section("CHECK 12: monotone warming, bounded by dT_eq (all runs)")
+    # Check monotone warming (again not sure what this is)
     for name, rr in list(runs.items()) + [("150-yr long run", long_run)]:
         mono = np.all(np.diff(rr["dT"]) > -1e-10)
         bounded = np.all(rr["dT"] <= rr["p"].dT_eq * (1 + 1e-9))

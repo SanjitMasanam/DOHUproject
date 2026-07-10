@@ -74,6 +74,7 @@ import os
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
 from dataclasses import dataclass, replace
 from scipy.integrate import solve_ivp
 from scipy.sparse import diags
@@ -498,25 +499,28 @@ def main():
     savefig(fig, "sweep_mixed_layer_depth.png")
 
     # -----------------------------------------------------------------
-    # FIGURE: depth profiles theta(z) at several times (k = 1 run).
-    # Shows the anomaly diffusing downward; only the top ~800 m matters
-    # over 35 yr (penetration ~ sqrt(kappa*t) ~ 330 m), which also
-    # justifies treating the 2700 m domain as semi-infinite.
+    # FIGURE: continuous depth-time evolution of the anomaly (k = 1 run).
+    # Rather than a handful of discrete year snapshots, show every saved
+    # profile theta(z) at once, colored continuously by time. A long run
+    # over the full ocean depth (z_max) is needed since the deep ocean
+    # barely responds within the original 35-yr window.
     # -----------------------------------------------------------------
-    section("FIGURE: depth_profiles.png (k = 1 run)")
-    r = runs["110 m + k = 1 cm$^2$/s"]
-    fig, ax = plt.subplots(figsize=(5.5, 6))
-    cmap = plt.cm.Blues
-    profile_years = [1, 2, 5, 10, 20, 35]
-    for yr, shade in zip(profile_years, np.linspace(0.35, 0.95, len(profile_years))):
-        i = np.argmin(np.abs(r["t"] - yr * YEAR))       # nearest saved time
-        ax.plot(r["theta"][:, i], r["z"], color=cmap(shade), lw=2,
-                label=f"t = {yr} yr")
-    ax.set_ylim(800, 0)                                  # depth increases downward
+    section("FIGURE: depth_profiles.png (k = 1 run, 1000-yr, full depth)")
+    deep_run = solve_model(replace(p, t_final=1000.0 * YEAR), n_save=500)
+    t_yr, z, theta = deep_run["t"] / YEAR, deep_run["z"], deep_run["theta"]
+    segments = [np.column_stack([theta[:, i], z]) for i in range(theta.shape[1])]
+    lc = LineCollection(segments, cmap="viridis", array=t_yr, linewidths=1.5)
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+    ax.add_collection(lc)
+    ax.set_xlim(theta.min(), theta.max() * 1.05)
+    ax.set_ylim(p.z_max, 0)                              # depth increases downward
+    cbar = fig.colorbar(lc, ax=ax)
+    cbar.set_label("Years")
     ax.set(xlabel=r"$\theta$ anomaly ($\degree$C)", ylabel="Depth z (m)",
-           title="Anomaly diffusing into the thermocline\n(110 m + k = 1 cm$^2$/s)")
+           title="Continuous depth-time evolution of the thermocline anomaly\n"
+                 "(110 m + k = 1 cm$^2$/s, 1000-yr run)")
     style_axes(ax)
-    ax.legend(frameon=False, fontsize=9, loc="lower right")
     fig.tight_layout()
     savefig(fig, "depth_profiles.png")
 
