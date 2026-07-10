@@ -1163,7 +1163,7 @@ for run_type in [1, 2, 3]:
 
          ax.text(
             0.02,
-            0.88,
+            0.92,
             f"$\\tau_s$ = {tau_s:.1f} yr\n$\\epsilon$ = {epsilon:.2f}",
             transform=ax.transAxes,
             va="top",
@@ -1249,7 +1249,23 @@ for run_type in [1, 2, 3]:
                ax.scatter(151, tau_s_runType2, s=14, color='yellow', label=r'50-yr Avg T$_{eq}$')
                ax.scatter(len(T_4x_raw), tau_s_runType3, s=14, color='green', label=r'50-yr Avg + LR Fit')
 
-            format_ax(ax, text=model, xscale="linear", yscale="linear", legend_loc='lower right')
+            # How close this model actually got to equilibrium by the end
+            # of its own run (last-10-yr mean T2M anomaly / T_eq), shown as
+            # extra text under the model-name label.
+            eq_ratio = float((np.mean(T_4x_raw[-10:]) - T_base_full) / T_eq)
+
+            ax.text(
+               0.02,
+               0.92,
+               f"$Reached {eq_ratio * 100:.0f}% of $T_{{eq}}$",
+               transform=ax.transAxes,
+               va="top",
+               ha="left",
+               fontsize=8,
+               bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4),
+            )
+
+            format_ax(ax, text=f"{model}", xscale="linear", yscale="linear", legend_loc='upper right')
 
          # ----------------- NETTOA time-series plot -----------------
          T_obs_roll = rolling_mean(T_obs, window=10)
@@ -1373,13 +1389,14 @@ for run_type in [1, 2, 3]:
       # so the longest run's data is never clipped in any panel.
       populated_axs = [ax for ax in tau_s_axs if ax.has_data()]
       if populated_axs:
-         xmin = min(ax.dataLim.intervalx[0] for ax in populated_axs)
          xmax = max(ax.dataLim.intervalx[1] for ax in populated_axs)
-         ymin = min(ax.dataLim.intervaly[0] for ax in populated_axs)
          ymax = max(ax.dataLim.intervaly[1] for ax in populated_axs)
          for ax in tau_s_axs:
-            ax.set_xlim(xmin, xmax)
-            ax.set_ylim(ymin, ymax)
+            ax.set_xlim(0, xmax + 100)
+            ax.set_ylim(0, ymax + 100)
+            # Denser tick marks than the default locator gives.
+            ax.xaxis.set_major_locator(mpl.ticker.MaxNLocator(nbins=10))
+            ax.yaxis.set_major_locator(mpl.ticker.MaxNLocator(nbins=10))
 
       tau_s_fig.savefig(
          outdir / current_dir / "step2" / "png" / f"4xCO2_all_models_tau_s_vs_calibration_t{run_type_suffix}.png",

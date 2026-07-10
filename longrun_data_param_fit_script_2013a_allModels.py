@@ -431,7 +431,13 @@ for run_type in [3, 2, 1]:
                      ax.scatter(151, tau_s_runType2, s=14, color='yellow', label=r'50-yr Avg T$_{eq}$')
                      ax.scatter(t2m.shape[0], tau_s_runType3, s=14, color='green', label=r'50-yr Avg + LR Fit')
 
-                  format_ax(ax, text=f"{model}", xscale="linear", yscale="linear", legend_loc='upper right')
+                  # How close this model actually got to equilibrium by the end
+                  # of its own run (last-10-yr mean T2M anomaly / T_eq), shown as
+                  # extra text under the model-name label.
+                  T2M_raw_full = np.array(expt_data.rx2("T2M")).ravel()
+                  eq_ratio = float((np.mean(T2M_raw_full[-10:]) - t2m_mean) / T_eq)
+
+                  format_ax(ax, text=f"{model}\nReached {eq_ratio * 100:.0f}%\nof $T_{{eq}}$", xscale="linear", yscale="linear", legend_loc='upper right')
                   tau_s_idx[expt] += 1
 
                # Fit step 2
@@ -550,13 +556,14 @@ for run_type in [3, 2, 1]:
          # so the longest run's data is never clipped in any panel.
          populated_axs = [ax for ax in tau_s_axs[expt] if ax.has_data()]
          if populated_axs:
-            xmin = min(ax.dataLim.intervalx[0] for ax in populated_axs)
             xmax = max(ax.dataLim.intervalx[1] for ax in populated_axs)
-            ymin = min(ax.dataLim.intervaly[0] for ax in populated_axs)
             ymax = max(ax.dataLim.intervaly[1] for ax in populated_axs)
             for ax in tau_s_axs[expt]:
-               ax.set_xlim(xmin, xmax + 100)
-               ax.set_ylim(ymin, ymax + 100)
+               ax.set_xlim(0, xmax + 100)
+               ax.set_ylim(0, ymax + 100)
+               # Denser tick marks than the default locator gives.
+               ax.xaxis.set_major_locator(mpl.ticker.MaxNLocator(nbins=10))
+               ax.yaxis.set_major_locator(mpl.ticker.MaxNLocator(nbins=10))
 
          tau_s_figs[expt].savefig(
             outdir / current_dir / "step2" / "png" / f"{expt}_all_models_tau_s_vs_calibration_t{suffix}.png",
