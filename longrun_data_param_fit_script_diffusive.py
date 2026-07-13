@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import time
+import multiprocessing
 import rpy2.robjects as ro
 import numpy as np
 import pandas as pd
@@ -26,12 +27,69 @@ SENSITIVITY_HML_FACTOR_RANGE = (0.25, 50.0)     # multiplicative range around h_
 SENSITIVITY_N_1D = 13                         # points in each 1-D spaghetti sweep
 SENSITIVITY_N_2D = 9                          # points per axis in the joint grid (N_2D^2 solves/model)
 SENSITIVITY_KAPPA_BOUNDS = (1e-7, 1e-3)       # matches the curve_fit bounds below
-SENSITIVITY_HML_BOUNDS = (5.0, 2000.0)
+SENSITIVITY_HML_BOUNDS = (10.0, 2000.0)
+
+# Diagnostic-only solver settings for the sensitivity sweep: looser tolerance
+# and fewer saved points than the actual kappa_pde/h_ml_pde fit (n_save=250,
+# rtol=1e-8), since these solves only feed spaghetti/heatmap plots and never
+# touch the fitted parameters themselves.
+SENSITIVITY_N_SAVE = 100
+SENSITIVITY_RTOL = 1e-6
+SENSITIVITY_ATOL = 1e-8
 
 # Progress/ETA tracking across the whole script (all run_types x results x models).
 RUN_TYPES = [1, 2, 3]
 RESULT_KINDS = ["validation", "unblinded"]
 _SCRIPT_START_TIME = time.time()
+
+
+def _sensitivity_solve_dT(kappa, h_ml, F_ref, T_eq, t_final_years, t_eval):
+   """PDE surface response for one sensitivity-sweep (kappa, h_ml) point.
+
+   Mirrors the per-point evaluation inside the main curve_fit target
+   (make_pde_dT below), but at loosened tolerance/n_save and as a
+   module-level function rather than a closure, so it can be dispatched to
+   the multiprocessing pool -- sweep points only populate diagnostic plots,
+   never the fitted kappa_pde/h_ml_pde themselves.
+   """
+   z_max = min(4000.0, max(2700.0, 6.0 * np.sqrt(kappa * t_final_years * YEAR)))
+   nz = int(min(401, max(121, z_max / 15.0 + 1)))
+   pde_p = PDEParams(
+      kappa=kappa, h_ml=h_ml, dT_eq=T_eq, F0=F_ref,
+      z_max=z_max, Nz=nz, t_final=t_final_years * YEAR,
+   )
+   sol = pde_solve_model(pde_p, n_save=SENSITIVITY_N_SAVE, rtol=SENSITIVITY_RTOL, atol=SENSITIVITY_ATOL)
+   return np.interp(t_eval, sol["t"] / YEAR, sol["dT"])
+
+
+# Sensitivity-sweep points are independent (kappa, h_ml) solves, so farm them
+# out across cores instead of running all ~100/model sequentially. Opened
+# once and reused for the whole script; closed at the very end.
+_SENS_POOL = multiprocessing.get_context("fork").Pool()
+
+# Load the .Rdata file once and reuse it across every run_type/results
+# iteration below -- the source data never changes between iterations.
+rdata_file = Path("./data/int_netToa_longrun.Rdata")
+ro.r["load"](str(rdata_file))
+
+data = ro.globalenv["int_nettoa_longrun_data"]
+models = ['CCSM3', 'CESM1', 'CNRMCM6', 'ECHAM5', 'GISSE2R', 'IPSLCM5A', 'HadGEM2', 'MPIESM11']
+expts = list(ro.globalenv["expts"])
+
+tcr = {
+    "CCSM3": 1.7,      # no direct CMIP6 equivalent
+    "CESM1": 2.0,       # CESM2
+    "CNRMCM6": 2.1,     # CNRM-CM6-1
+    "ECHAM5": 3.0,     # no direct CMIP6 equivalent
+    "GISSE2R": 1.5,     # GISS-E2-1-G (or 1.9 for GISS-E2-1-H)
+    "IPSLCM5A": 2.3,    # IPSL-CM6A-LR
+    "HadGEM2": 2.5,     # HadGEM3-GC31-LL
+    "MPIESM11": 2.0,    # MPI-ESM1-LR
+}
+
+# Output directory (created once; per-run_type subdirs are made inside the loop)
+outdir = Path("./figures_diffusive")
+outdir.mkdir(exist_ok=True)
 
 for run_type in RUN_TYPES:
    for results in RESULT_KINDS:
@@ -53,11 +111,7 @@ for run_type in RUN_TYPES:
       suffix = f"_{extra_text}" if extra_text else ""
 
       def sympy_prop_unc(expr, values, uncertainties):
-         """
-         expr: SymPy expression
-         values: dict of {symbol: value}
-         uncertainties: dict of {symbol: uncertainty}
-         """
+         """Propagate uncertainties through a SymPy expression (first-order, uncorrelated)."""
          variance = 0.0
          for sym, unc in uncertainties.items():
             deriv = sp.diff(expr, sym)
@@ -151,32 +205,9 @@ for run_type in RUN_TYPES:
          "T_eq_unc",
       ]
       df = pd.DataFrame(columns=param_cols)
-
-      # Load the .Rdata file into the R global environment
-      rdata_file = Path("./data/int_netToa_longrun.Rdata")
-      ro.r["load"](str(rdata_file))
-
-      # Read models and experiments into Python lists
-      data = ro.globalenv["int_nettoa_longrun_data"]
-      models = ['CCSM3', 'CESM1', 'CNRMCM6', 'ECHAM5', 'GISSE2R', 'IPSLCM5A', 'HadGEM2', 'MPIESM11']
-      expts = list(ro.globalenv["expts"])
       df["model"] = models
 
-      # Make output directory if needed
-      outdir = Path("./figures_diffusive")
-      outdir.mkdir(exist_ok=True)
       ensure_dirs(outdir, current_dir, ["step1", "validation", "unblinded"])
-
-      tcr = {
-          "CCSM3": 1.7,      # no direct CMIP6 equivalent
-          "CESM1": 2.0,       # CESM2
-          "CNRMCM6": 2.1,     # CNRM-CM6-1
-          "ECHAM5": 3.0,     # no direct CMIP6 equivalent
-          "GISSE2R": 1.5,     # GISS-E2-1-G (or 1.9 for GISS-E2-1-H)
-          "IPSLCM5A": 2.3,    # IPSL-CM6A-LR
-          "HadGEM2": 2.5,     # HadGEM3-GC31-LL
-          "MPIESM11": 2.0,    # MPI-ESM1-LR
-      }
 
       # Prepare combined figures for each experiment
       step1_figs = {}
@@ -221,7 +252,7 @@ for run_type in RUN_TYPES:
       sens_t63_meshes = {}    # list of (QuadMesh, grid) per expt
       sens_rmse_meshes = {}   # list of (QuadMesh, grid) per expt
 
-      # Create shared figures for the 4xCO2 experiment and a 10-panel Net TOA layout
+      # Create the shared per-experiment figures (one 8-panel grid per model set)
       for expt in ['4xCO2']:
          step1_figs[expt], step1_axs[expt] = make_model_grid(models, title=r"4xCO$_{2}$ Net TOA vs T$_{2M}$", xlabel="2-meter Air Temperature Anomaly (K)", ylabel=r"Net TOA Radiative Flux Anomaly ($W*m^{-2}$)")
          step1_idx[expt] = 0
@@ -254,7 +285,7 @@ for run_type in RUN_TYPES:
          sens_t63_meshes[expt] = []
          sens_rmse_meshes[expt] = []
 
-      # ----------------- STEP 1 ---------------------
+      # ----- STEP 1: fit F_ref/lambda/T_eq from the 4xCO2 T2M-vs-NETTOA regression -----
 
       for model in models:
          # Extract model data from the R dataset
@@ -371,7 +402,7 @@ for run_type in RUN_TYPES:
 
       print("Finished Step 1: saved combined Step 1 figures & params to df")
 
-      # ----------------- Plot final results ---------------------
+      # ----- STEP 2: fit the box/diffusive/PDE models and plot final results -----
 
       for model in models:
          # Extract model data for plotting results
@@ -467,7 +498,7 @@ for run_type in RUN_TYPES:
                pde_dT_func = make_pde_dT(F_ref, T_eq, t_final_years)
                popt, pcov = curve_fit(
                   pde_dT_func, fit_t, fit_T * T_eq,
-                  p0=[1.0e-4, 110.0], bounds=([1e-7, 5.0], [1e-3, 2000.0]), max_nfev=60,
+                  p0=[1.0e-4, 100.0], bounds=([1e-7, 50.0], [1e-3, 300.0]), max_nfev=60,
                )
                perr = np.sqrt(np.diag(pcov))
 
@@ -502,11 +533,12 @@ for run_type in RUN_TYPES:
                h_ml_box = popt[0]
                pde_T_box = pde_dT_box(plot_t, h_ml_box) / T_eq
 
-               # ----------------- Sensitivity sweep: kappa & h_ml -----------------
+               # ----- Sensitivity sweep: kappa & h_ml -----
                # Sweep the two free PDE parameters around this model's best fit to
-               # see how sensitive/well-constrained the fit is. Reuses pde_dT_func
-               # (defined above), so every sweep point goes through the same PDE
-               # solver used for the fit itself.
+               # see how sensitive/well-constrained the fit is. Every sweep point
+               # is an independent PDE solve, so they're dispatched to _SENS_POOL
+               # (loosened tolerance -- see SENSITIVITY_N_SAVE/RTOL/ATOL) rather
+               # than run sequentially through pde_dT_func's tight-tolerance solver.
                kappa_lo = max(SENSITIVITY_KAPPA_BOUNDS[0], kappa_pde * SENSITIVITY_KAPPA_FACTOR_RANGE[0])
                kappa_hi = min(SENSITIVITY_KAPPA_BOUNDS[1], kappa_pde * SENSITIVITY_KAPPA_FACTOR_RANGE[1])
                h_ml_lo = max(SENSITIVITY_HML_BOUNDS[0], h_ml_pde * SENSITIVITY_HML_FACTOR_RANGE[0])
@@ -516,27 +548,44 @@ for run_type in RUN_TYPES:
                # spaghetti plots.
                kappa_grid_1d = np.geomspace(kappa_lo, kappa_hi, SENSITIVITY_N_1D)
                h_ml_grid_1d = np.linspace(h_ml_lo, h_ml_hi, SENSITIVITY_N_1D)
-               kappa_sweep_curves = [pde_dT_func(plot_t, k, h_ml_pde) / T_eq for k in kappa_grid_1d]
-               h_ml_sweep_curves = [pde_dT_func(plot_t, kappa_pde, h) / T_eq for h in h_ml_grid_1d]
+               kappa_sweep_curves = [
+                  c / T_eq for c in _SENS_POOL.starmap(
+                     _sensitivity_solve_dT,
+                     [(k, h_ml_pde, F_ref, T_eq, t_final_years, plot_t) for k in kappa_grid_1d],
+                  )
+               ]
+               h_ml_sweep_curves = [
+                  c / T_eq for c in _SENS_POOL.starmap(
+                     _sensitivity_solve_dT,
+                     [(kappa_pde, h, F_ref, T_eq, t_final_years, plot_t) for h in h_ml_grid_1d],
+                  )
+               ]
 
                # Joint 2-D grid, shared by both heatmaps below: one PDE solve per
                # cell (on a common fine time grid), then both metrics (time to 63%
                # of T_eq, and RMSE against the AOGCM fit data) are derived from
-               # that single solve by interpolation.
+               # that single solve by interpolation. Cells are independent, so
+               # solved in parallel and reshaped back into the grid afterward.
                kappa_grid_2d = np.geomspace(kappa_lo, kappa_hi, SENSITIVITY_N_2D)
                h_ml_grid_2d = np.linspace(h_ml_lo, h_ml_hi, SENSITIVITY_N_2D)
                target_63 = (1.0 - np.exp(-1.0)) * T_eq
                t_grid_common = np.linspace(1.0, t_final_years, 400)
 
+               grid_2d_args = [
+                  (k_val, h_val, F_ref, T_eq, t_final_years, t_grid_common)
+                  for h_val in h_ml_grid_2d
+                  for k_val in kappa_grid_2d
+               ]
+               grid_2d_curves = _SENS_POOL.starmap(_sensitivity_solve_dT, grid_2d_args)
+
                t63_grid = np.full((SENSITIVITY_N_2D, SENSITIVITY_N_2D), np.nan)
                rmse_grid = np.full((SENSITIVITY_N_2D, SENSITIVITY_N_2D), np.nan)
-               for ih, h_val in enumerate(h_ml_grid_2d):
-                  for ik, k_val in enumerate(kappa_grid_2d):
-                     dT_common = pde_dT_func(t_grid_common, k_val, h_val)
-                     if dT_common[-1] >= target_63:
-                        t63_grid[ih, ik] = np.interp(target_63, dT_common, t_grid_common)
-                     dT_at_fit = np.interp(fit_t, t_grid_common, dT_common)
-                     rmse_grid[ih, ik] = np.sqrt(np.mean((dT_at_fit - fit_T * T_eq) ** 2))
+               for idx, dT_common in enumerate(grid_2d_curves):
+                  ih, ik = divmod(idx, SENSITIVITY_N_2D)
+                  if dT_common[-1] >= target_63:
+                     t63_grid[ih, ik] = np.interp(target_63, dT_common, t_grid_common)
+                  dT_at_fit = np.interp(fit_t, t_grid_common, dT_common)
+                  rmse_grid[ih, ik] = np.sqrt(np.mean((dT_at_fit - fit_T * T_eq) ** 2))
 
                # --- Panel 1: kappa spaghetti (sequential blue ramp = kappa) ---
                # Curves are recolored to the figure-wide shared norm once every
@@ -591,7 +640,7 @@ for run_type in RUN_TYPES:
                format_ax(ax, text=f"{model}", xscale="log", yscale="linear", legend=False, grid=False)
                sens_t63_idx[expt] += 1
 
-               # --- Panel 4: RMSE-vs-data heatmap over (kappa, h_ml) --------------
+               # --- Panel 4: RMSE-vs-data heatmap over (kappa, h_ml) ---
                # This is the cost surface curve_fit minimized: a sharp minimum at
                # the star means kappa/h_ml are well-constrained; a shallow ridge
                # through the star means the two parameters trade off (equifinality).
@@ -602,34 +651,6 @@ for run_type in RUN_TYPES:
                sens_rmse_meshes[expt].append((mesh, rmse_grid))
                format_ax(ax, text=f"{model}", xscale="log", yscale="linear", legend=False, grid=False)
                sens_rmse_idx[expt] += 1
-
-               # # Plot OHC vs. T_s
-               # if results == 'unblinded':
-               #    T_ohc = T_eq * (a_f * (1 - np.exp(-np.arange(1, 1 + 100000, 1) / tau_f)) + a_s * (1 - np.exp(-np.arange(1, 1 + 100000, 1) / tau_s)))
-               #    N_pred = F_ref - lmbda * T_ohc
-               #    normalized_OHC_pred = (5.1e14 * 31536000 * np.cumsum(N_pred))/(1.37e21 * 3850)
-               #    normalized_OHC = (5.1e14 * 31536000 * np.cumsum(nettoa))/(1.37e21 * 3850)
-                     
-               #    [m_ohcTs, b_ohcTs] = np.polyfit(t2m[:5]/T_eq, normalized_OHC[:5]/T_eq, 1)
-               #    t_val = np.arange(0, 1.1, 0.1)
-                     
-
-               #    cmap = plt.cm.turbo
-               #    norm = mpl.colors.Normalize(vmin=0, vmax=6000)
-               #    A = 2 * tcr[model] / T_eq
-               #    ax = ohc_ts_axs[expt][ohc_ts_idx[expt]]
-               #    sc = ax.scatter(t2m/T_eq, normalized_OHC/T_eq, c=np.arange(1, 1+normalized_OHC.shape[0], 1), cmap=cmap, norm=norm)
-               #    ax.plot(t_val,m_ohcTs*t_val + b_ohcTs, ls='--', color='red', label=f'Mixed Layer Depth = {(m_ohcTs*2500):.0f} m')
-               #    ax.plot(t_val, (t_val-A)/(1-A), ls='--', color='black', label='2-box Asymptotic Pred.')
-               #    ax.plot(T_ohc/T_eq,normalized_OHC_pred/T_eq, color='green', label=f'Fitted 2-Box Pred.')
-               #    ax.set_ylim(-0.05, 1.2)
-               #    ax.axvline(1.0, color="0.55", ls='--', lw=0.8)
-               #    ax.axvline(A, color="0.55", ls='--', lw=0.8)
-               #    ax.set_title(f"{model} {expt}:OHU vs. Surface Temp (Normalized)")
-               #    ax.set_xlabel(r"$\frac{T_s}{2\, \mathrm{ECS}}$")
-               #    ax.set_ylabel(r"$\frac{\mathrm{OHC}}{\mathrm{OHC}_{eq}}$")
-               #    ax.legend(fontsize=8, loc='upper left')
-               #    ohc_ts_idx[expt] += 1
 
                # Draw observed and fitted temperature curves
                ax = final_axs[expt][final_idx[expt]]
@@ -681,7 +702,7 @@ for run_type in RUN_TYPES:
 
                final_idx[expt] += 1
 
-               # ----------------- Progress / ETA -----------------
+               # ----- Progress / ETA -----
                # Printed once per model (this is where the sensitivity sweep's
                # PDE solves happen, so it dominates the runtime); the ETA gets
                # more accurate as more models complete.
@@ -700,20 +721,6 @@ for run_type in RUN_TYPES:
                   f"elapsed={elapsed/60:.1f} min, avg={avg_per_model:.1f} s/model, "
                   f"ETA remaining={eta_remaining/60:.1f} min"
                )
-
-               # # Plot nettoa timeseries
-               # ax = nettoa_axs[expt][nettoa_idx[expt]]
-               # ax.plot(t[:nettoa_rollingMu.shape[0]], nettoa_rollingMu, color='black', label='AOGCM')
-               # ax.plot(t[:nettoa_rollingMu.shape[0]], F_ref - lmbda * t2m_rollingMu, label='50-yr Avg')
-               # if results == 'unblinded': ax.plot(t, F_ref - lmbda * T_eq * fit_func(plot_t, D), label='Diffusive (50-yr Avg + LR Fit)')
-               # ax.set_title(f"{model} {expt} Net TOA (W m^-2)")
-               # ax.set_xlabel("Time (years)")
-               # ax.set_ylabel("Net TOA (10 yr rolling mean)")
-               # ax.set_xscale(scale)
-               # ax.set_yscale("log")
-               # ax.grid(True)
-               # ax.legend(fontsize=8, loc='upper right')
-               # nettoa_idx[expt] += 1
 
       # Save combined final figures in both linear and log x-scale variants
       for expt in ['4xCO2']:
@@ -747,7 +754,7 @@ for run_type in RUN_TYPES:
 
          plt.close(final_figs[expt])
 
-         # --- Shared colorbars for the 4 sensitivity figures ----------------
+         # --- Shared colorbars for the 4 sensitivity figures ---
          # Put every subplot of a given figure on one common color scale, then
          # draw a single bolded colorbar spanning all panels on the right. The
          # two spaghetti figures are recolored to their figure-wide norm here.
@@ -809,32 +816,7 @@ for run_type in RUN_TYPES:
             )
             plt.close(fig)
 
-         # nettoa_figs[expt].savefig(
-         #    outdir / current_dir / results / "png" / f"{expt}_all_models_NETTOA_timeseries_{scale}{suffix}.png",
-         #    dpi=200,
-         #    bbox_inches="tight",
-         # )
-         # nettoa_figs[expt].savefig(
-         #    outdir / current_dir / results / "pdf" / f"{expt}_all_models_NETTOA_timeseries_{scale}{suffix}.pdf",
-         #    bbox_inches="tight",
-         # )
-         # plt.close(nettoa_figs[expt])
-
-         # if results == 'unblinded':
-         #    cbar = ohc_ts_figs[expt].colorbar(sc, ax=ohc_ts_axs[expt].ravel().tolist(), fraction=0.025, pad=0.025)
-         #    cbar.set_label("Year")
-
-         #    ohc_ts_figs[expt].savefig(
-         #       outdir / current_dir / results / "png" / f"{expt}_all_models_ohc_ts{suffix}.png",
-         #       dpi=200,
-         #       bbox_inches="tight",
-         #    )
-         #    ohc_ts_figs[expt].savefig(
-         #       outdir / current_dir / results / "pdf" / f"{expt}_all_models_ohc_ts{suffix}.pdf",
-         #       bbox_inches="tight",
-         #    )
-         #    plt.close(ohc_ts_figs[expt])
-
       print("Finished final val/result plots")
 
-
+_SENS_POOL.close()
+_SENS_POOL.join()
