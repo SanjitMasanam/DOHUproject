@@ -638,7 +638,7 @@ for run_type in [1, 2, 3]:
       df = pd.DataFrame(columns=PARAM_COLS)
       df["model"] = models
 
-      outdir = Path("./2013b_figures")
+      outdir = Path("./figures_2013b")
       outdir.mkdir(exist_ok=True)
       ensure_dirs(outdir, current_dir, ["step1", "step2", "validation", "unblinded"])
 

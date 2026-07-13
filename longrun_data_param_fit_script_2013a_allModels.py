@@ -156,7 +156,7 @@ for run_type in [3, 2, 1]:
       df["model"] = models
 
       # Make output directory if needed
-      outdir = Path("./2013a_figures")
+      outdir = Path("./figures_2013a")
       outdir.mkdir(exist_ok=True)
       ensure_dirs(outdir, current_dir, ["step1", "step2", "validation", "unblinded"])
 

@@ -28,6 +28,11 @@ the slab ODE couples to the interior PDE.
 
     Bottom, z = z_max: insulated (zero flux). z_max is chosen large enough
     that the domain is effectively semi-infinite over the runs (checked below).
+    Setting Params.semi_infinite = True makes this rigorous: solve_model then
+    auto-deepens z_max (and Nz) to many diffusive penetration depths below the
+    surface, so the insulated wall is never reached and the ocean behaves as an
+    "effectively infinite" heat reservoir. (Equivalently, one may pass a large
+    z_max by hand.)
 
 Hansen Eq. 24 writes the surface forcing as
     F = F0 / dT_eq * (dT_eq - T_0)  =  F0 - (F0/dT_eq) * T_0,
@@ -92,7 +97,17 @@ except ImportError:
 YEAR = 365.25 * 24 * 3600.0          # seconds per year
 CM2S_TO_M2S = 1.0e-4                 # 1 cm^2/s = 1e-4 m^2/s (paper quotes k in cm^2/s)
 
-OUTDIR = "1lyrEBM_diffusive"          # all figures go here (created below)
+OUTDIR = "figures_diffusiveChecks"          # all figures go here (created below)
+
+# Semi-infinite ("effectively infinite ocean") domain sizing. When
+# Params.semi_infinite is True, solve_model places the insulated bottom
+# SEMI_INF_PAD * (2*sqrt(kappa*t_final)) below the surface. The anomaly at
+# depth z scales like erfc(z / (2*sqrt(kappa*t))), so at the padded depth the
+# residual is erfc(SEMI_INF_PAD) = erfc(4) ~ 1.5e-8 of the surface value --
+# i.e. the wall is genuinely never felt. SEMI_INF_MAX_NZ caps the grid so
+# deep/long infinite runs stay affordable (dz coarsens if the cap is hit).
+SEMI_INF_PAD = 4.0
+SEMI_INF_MAX_NZ = 2001
 
 # Fixed-order categorical palette (colorblind-safe subset of Okabe-Ito,
 # validated for CVD separation). Assigned by entity, never cycled.
@@ -129,6 +144,9 @@ class Params:
     z_max: float = 2700.0              # domain depth [m]; >> diffusive penetration
     Nz: int = 241                      # grid points => dz = 11.25 m
     t_final: float = 35.0 * YEAR       # Fig. 16 window; overridden for long runs
+    semi_infinite: bool = False        # if True, solve_model auto-deepens z_max/Nz
+                                       # so the insulated bottom is never reached
+                                       # ("effectively infinite ocean" limit)
 
     # ---- derived quantities (comments give units) ----
     @property
@@ -200,7 +218,19 @@ def solve_model(p, n_save=400, rtol=1e-8, atol=1e-10):
         it from finite-differencing a dense Nz x Nz matrix.
       - n_save = 400 output times => smooth dT(t) curves and accurate
         trapezoid time-integrals in the energy check.
+      - semi_infinite: the domain is auto-deepened to SEMI_INF_PAD diffusive
+        penetration depths so the insulated bottom is never felt (see the
+        SEMI_INF_* constants). We rebind p via replace() so the returned p,
+        grid, and all energy/BC bookkeeping stay consistent with the grid
+        actually solved. kappa == 0 (pure slab) is a no-op: with no diffusion
+        the depth is irrelevant.
     """
+    if p.semi_infinite and p.kappa > 0.0:
+        dz0 = p.z_max / (p.Nz - 1)                     # keep original resolution
+        z_max = max(p.z_max, SEMI_INF_PAD * 2.0 * np.sqrt(p.kappa * p.t_final))
+        Nz = min(int(np.ceil(z_max / dz0)) + 1, SEMI_INF_MAX_NZ)  # cap cost; dz coarsens if hit
+        p = replace(p, z_max=z_max, Nz=Nz, semi_infinite=False)
+
     z = np.linspace(0.0, p.z_max, p.Nz)
     dz = z[1] - z[0]
     u0 = np.zeros(p.Nz)                       # anomaly starts at zero
@@ -523,6 +553,54 @@ def main():
     style_axes(ax)
     fig.tight_layout()
     savefig(fig, "depth_profiles.png")
+
+    # -----------------------------------------------------------------
+    # FIGURE + CHECK: finite vs effectively-infinite ocean (k = 1, 110 m).
+    # The default z_max = 2700 m has an INSULATED bottom, so once the
+    # diffusive front reaches it (~577 yr here) heat can no longer drain
+    # downward and the capped column saturates toward dT_eq FASTER than a
+    # truly deep ocean would. semi_infinite=True auto-deepens the domain so
+    # the bottom is never felt: the deep ocean keeps absorbing heat and the
+    # surface lags. The two must be indistinguishable early and diverge late.
+    # -----------------------------------------------------------------
+    section("FIGURE: finite_vs_infinite.png  +  CHECK: finite/infinite ocean (3000-yr)")
+    T_LONG = 3000.0 * YEAR
+    finite = solve_model(replace(p, t_final=T_LONG))                     # z_max=2700, insulated
+    infinite = solve_model(replace(p, t_final=T_LONG, semi_infinite=True))  # auto-deep
+    print(f"  finite: z_max = {finite['p'].z_max:.0f} m, Nz = {finite['p'].Nz}")
+    print(f"  infinite: z_max = {infinite['p'].z_max:.0f} m, Nz = {infinite['p'].Nz}")
+
+    # Early-time agreement: before the front reaches 2700 m the insulated wall
+    # is irrelevant, so the two surface series must coincide. (t_eval grids are
+    # identical since only z_max/Nz differ, so compare pointwise.)
+    t_yr_fi = finite["t"] / YEAR
+    early = t_yr_fi < 400.0
+    early_gap = np.max(np.abs(finite["dT"][early] - infinite["dT"][early]))
+    check(f"max|finite - infinite| for t < 400 yr = {early_gap:.2e} C",
+          early_gap < 1e-3 * p.dT_eq, "tol 1e-3*dT_eq; wall not yet reached")
+
+    # Late-time divergence: the capped column warms toward equilibrium faster.
+    dfin, dinf = finite["dT"][-1], infinite["dT"][-1]
+    check(f"dT(3000 yr): finite = {dfin:.3f} C > infinite = {dinf:.3f} C",
+          dfin > dinf and dfin <= p.dT_eq * (1 + 1e-9)
+          and dinf <= p.dT_eq * (1 + 1e-9),
+          "finite (insulated) saturates faster; both bounded by dT_eq")
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.plot(t_yr_fi, finite["dT"], color=C_VERM, lw=2,
+            label=f"finite ($z_{{max}}$ = {p.z_max:.0f} m, insulated)")
+    ax.plot(infinite["t"] / YEAR, infinite["dT"], color=C_BLUE, lw=2,
+            label=r"effectively infinite ocean")
+    ax.axhline(p.dT_eq, color="0.4", lw=1, ls="--")
+    ax.text(2350, p.dT_eq + 0.05, r"$\Delta T_{eq}$", color="0.3", fontsize=9)
+    ax.set(xlabel="Years", ylabel=r"$\Delta T$ ($\degree$C)", xlim=(0, 3000),
+           ylim=(0, p.dT_eq * 1.05),
+           title="Finite (insulated) vs effectively infinite ocean\n"
+                 "(110 m + k = 1 cm$^2$/s): identical early, diverge late")
+    style_axes(ax)
+    ax.legend(frameon=False, fontsize=9, loc="lower right")
+    fig.tight_layout()
+    savefig(fig, "finite_vs_infinite.png")
 
     # -----------------------------------------------------------------
     # CHECK 9 + FIGURE: energy conservation. The bottom is insulated, so
