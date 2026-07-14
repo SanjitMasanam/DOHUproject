@@ -87,7 +87,7 @@ def load_run_type_dfs(base_dir):
     # Read each CSV into a dataframe so the parameter values for all run types can be compared.
     dfs = {}
     for run_type, subdir in run_type_dirs.items():
-        if base_dir == Path("./2013a_figures"): csv_path = base_dir / subdir / "fitted_model_params.csv"
+        if base_dir == Path("./figures_2013a"): csv_path = base_dir / subdir / "fitted_model_params.csv"
         else: csv_path = base_dir / subdir / 'tables' / 'params_final.csv'
         if not csv_path.exists():
             raise FileNotFoundError(f"Missing CSV for run_type {run_type}: {csv_path}")
@@ -118,7 +118,7 @@ def plot_parameter_progression(dfs, output_dir):
         r"$a_s$",
     ]
     run_types = [1, 2, 3]
-    label_dct = {1: 'Replicate 2013a', 2: '50-yr Avg T_eq', 3: '50-yr Avg + LR Fit'}
+    label_dct = {1: 'Replicate Geoffroy', 2: '50-yr Avg T_eq', 3: '50-yr Avg + LR Fit'}
     colors = {1: "tab:blue", 2: "tab:orange", 3: "tab:green"}
     markers = {1: "o", 2: "s", 3: "^"}
     offsets = {1: -0.2, 2: 0.0, 3: 0.2}
@@ -179,7 +179,7 @@ def plot_parameter_progression(dfs, output_dir):
     print(f"Saved comparison plots to {out_png} and {out_pdf}")
 
 if __name__ == "__main__":
-    for base_dir in [Path("./2013a_figures"), Path("./2013b_figures")]:
+    for base_dir in [Path("./figures_2013a"), Path("./figures_2013b")]:
         output_dir = base_dir / "comparison_plots"
         dfs = load_run_type_dfs(base_dir)
         plot_parameter_progression(dfs, output_dir)

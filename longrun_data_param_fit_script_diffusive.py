@@ -43,7 +43,7 @@ PDE_FIT_N_SAVE = 250
 
 # Progress/ETA tracking across the whole script (all run_types x results x models).
 RUN_TYPES = [3, 2, 1]
-RESULT_KINDS = ["validation", "unblinded"]
+RESULT_KINDS = ["unblinded", "validation"]
 _SCRIPT_START_TIME = time.time()
 
 def _log_spaced_t_eval(t_final_seconds, n_save):
@@ -484,6 +484,16 @@ for run_type in RUN_TYPES:
                   fit_t = np.arange(1, 1 + fit_T.shape[0], 1)
                   plot_t = np.arange(1, 1 + plot_T.shape[0], 1)
 
+               # NETTOA sliced to the same window as plot_T/plot_t above, so
+               # the observed Net TOA data lines up index-for-index with the
+               # PDE fit curves evaluated on plot_t.
+               if results == "validation" and run_type in (1, 2):
+                  nettoa_plot = nettoa[:151]
+               elif results == "validation" and run_type == 3:
+                  nettoa_plot = nettoa[300:]
+               elif results == "unblinded":
+                  nettoa_plot = nettoa
+
                # Compute the fitted temperature curve & nettoa/OHC
                popt, pcov = curve_fit(fit_func_diff, fit_t, fit_T)
                perr = np.sqrt(np.diag(pcov))
@@ -527,7 +537,7 @@ for run_type in RUN_TYPES:
                pde_dT_func = make_pde_dT(F_ref, T_eq, t_final_years)
                popt, pcov = curve_fit(
                   pde_dT_func, fit_t, fit_T * T_eq,
-                  p0=[1.0e-4, 100.0], bounds=([1e-7, 50.0], [1e-3, 300.0]), max_nfev=60,
+                  p0=[1.0e-4, 100.0], bounds=([1e-7, 1], [1e-3, 300.0]), max_nfev=60,
                )
                perr = np.sqrt(np.diag(pcov))
 
@@ -567,6 +577,27 @@ for run_type in RUN_TYPES:
                )
                h_ml_box = popt[0]
                pde_T_box = pde_dT_box(plot_t, h_ml_box) / T_eq
+
+               # ----- OHC vs. T_s: AOGCM data vs. 1-Box + Diffusion fit -----
+               # Uses only the joint kappa_pde/h_ml_pde PDE fit (pde_T, the
+               # curve labeled "1-Box + Diffusion Fit" below) -- no 2-box
+               # model or mixed-layer-only reference lines. pde_T is only
+               # evaluated over plot_t (not extended to equilibrium), same as
+               # the AOGCM data it's compared against.
+               if results == 'unblinded':
+                  normalized_OHC = (5.1e14 * 31536000 * np.cumsum(nettoa)) / (1.37e21 * 3850)
+
+                  N_pde = F_ref - lmbda * (T_eq * pde_T)
+                  normalized_OHC_pred = (5.1e14 * 31536000 * np.cumsum(N_pde)) / (1.37e21 * 3850)
+
+                  cmap = plt.cm.turbo
+                  norm = mpl.colors.Normalize(vmin=0, vmax=6000)
+                  ax = ohc_ts_axs[expt][ohc_ts_idx[expt]]
+                  sc = ax.scatter(t2m/T_eq, normalized_OHC/T_eq, c=np.arange(1, 1+normalized_OHC.shape[0], 1), cmap=cmap, norm=norm)
+                  ax.plot(pde_T, normalized_OHC_pred/T_eq, color='green', label='1-Box + Diffusion Fit')
+                  ax.axvline(1.0, color="0.55", ls='--', lw=0.8)
+                  format_ax(ax, text=f"{model}", xscale="linear", yscale="linear", ylim=(-0.05, 1.2))
+                  ohc_ts_idx[expt] += 1
 
                # ----- Sensitivity sweep: kappa & h_ml -----
                # Sweep the two free PDE parameters around this model's best fit to
@@ -735,6 +766,23 @@ for run_type in RUN_TYPES:
 
                final_idx[expt] += 1
 
+               # ----- Net TOA vs. time: AOGCM data vs. 1-Box + Diffusion fit -----
+               # Predicted N follows directly from the Step-1 linear feedback
+               # relation N = F_ref - lambda*T_s, evaluated on the joint
+               # kappa_pde/h_ml_pde fit's own temperature curve (pde_T) rather
+               # than the raw AOGCM data.
+               nettoa_rollingMu = np.array([
+                  np.mean(nettoa_plot[i:i + 10]) for i in range(nettoa_plot.shape[0] - 9)
+               ])
+               t_rollingMu = plot_t[: nettoa_rollingMu.shape[0]]
+               N_pde = F_ref - lmbda * (T_eq * pde_T)
+
+               ax = nettoa_axs[expt][nettoa_idx[expt]]
+               ax.plot(t_rollingMu, nettoa_rollingMu, color="black", label="AOGCM")
+               ax.plot(plot_t, N_pde, color="purple", label="1-Box + Diffusion Fit")
+               format_ax(ax, text=f"{model}", xscale="linear", yscale="log", legend_loc="lower left")
+               nettoa_idx[expt] += 1
+
                # ----- Progress / ETA -----
                # Printed once per model (this is where the sensitivity sweep's
                # PDE solves happen, so it dominates the runtime); the ETA gets
@@ -785,7 +833,22 @@ for run_type in RUN_TYPES:
                bbox_inches="tight",
             )
 
+            for ax, xmax in zip(nettoa_axs[expt], final_xmax[expt]):
+               ax.set_xscale(scale)
+               ax.set_xlim(1, xmax + 1)
+
+            nettoa_figs[expt].savefig(
+               outdir / current_dir / results / "png" / f"{expt}_all_models_NETTOA_timeseries_{results}_{scale}{suffix}.png",
+               dpi=200,
+               bbox_inches="tight",
+            )
+            nettoa_figs[expt].savefig(
+               outdir / current_dir / results / "pdf" / f"{expt}_all_models_NETTOA_timeseries_{results}_{scale}{suffix}.pdf",
+               bbox_inches="tight",
+            )
+
          plt.close(final_figs[expt])
+         plt.close(nettoa_figs[expt])
 
          # --- Shared colorbars for the 4 sensitivity figures ---
          # Put every subplot of a given figure on one common color scale, then
@@ -870,6 +933,21 @@ for run_type in RUN_TYPES:
                bbox_inches="tight",
             )
             plt.close(fig)
+
+         if results == 'unblinded':
+            cbar = ohc_ts_figs[expt].colorbar(sc, ax=ohc_ts_axs[expt].ravel().tolist(), fraction=0.025, pad=0.025)
+            cbar.set_label("Year")
+
+            ohc_ts_figs[expt].savefig(
+               outdir / current_dir / results / "png" / f"{expt}_all_models_ohc_ts{suffix}.png",
+               dpi=200,
+               bbox_inches="tight",
+            )
+            ohc_ts_figs[expt].savefig(
+               outdir / current_dir / results / "pdf" / f"{expt}_all_models_ohc_ts{suffix}.pdf",
+               bbox_inches="tight",
+            )
+            plt.close(ohc_ts_figs[expt])
 
       print("Finished final val/result plots")
 

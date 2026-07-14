@@ -62,7 +62,7 @@ REPLICATE_LATE_YEAR_END = 150
 EARLY_YEAR_START = 1
 EARLY_YEAR_END = 10
 
-for run_type in [1, 2, 3]:
+for run_type in [2, 1, 3]:
    for results in ["unblinded", "validation"]:
       dir_list = [
          "geoffroy_replicate_results",
@@ -543,11 +543,17 @@ for run_type in [1, 2, 3]:
 
             if run_type == 3:
                   start = 50
+                  T_late_raw = select_years(T_4x_raw, start, None)
+                  N_late_raw = select_years(N_4x_raw, start, None)
+                  t_late = np.arange(start, start + len(T_late_raw), dtype=float)
             else:
-                  start = REPLICATE_LATE_YEAR_START
-            T_late_raw = select_years(T_4x_raw, start, None)
-            N_late_raw = select_years(N_4x_raw, start, None)
-            t_late = np.arange(start, start + len(T_late_raw), dtype=float)
+                  # run_type == 2: matches 2013a_allModels.py's Step 2, which
+                  # fits tau_s/a_s over years 30-150 for run_type in (1, 2)
+                  # even though T_eq (t_full/T_full/N_full above) is fit to
+                  # the entire run for run_type 2.
+                  T_late_raw = select_years(T_4x_raw, REPLICATE_LATE_YEAR_START, REPLICATE_LATE_YEAR_END)
+                  N_late_raw = select_years(N_4x_raw, REPLICATE_LATE_YEAR_START, REPLICATE_LATE_YEAR_END)
+                  t_late = np.arange(REPLICATE_LATE_YEAR_START, REPLICATE_LATE_YEAR_END + 1, dtype=float)
 
          T_early_raw = select_years(T_4x_raw, EARLY_YEAR_START, EARLY_YEAR_END)
          t_early = np.arange(EARLY_YEAR_START, EARLY_YEAR_END + 1, dtype=float)
