@@ -201,7 +201,7 @@ def make_rhs(dz, p):
     return rhs
 
 
-def solve_model(p, n_save=400, rtol=1e-8, atol=1e-10):
+def solve_model(p, n_save=400, rtol=1e-8, atol=1e-10, t_eval=None):
     """Integrate the model from a zero-anomaly initial state.
 
     Returns a dict with the saved times [s], the full field theta(z, t),
@@ -217,7 +217,9 @@ def solve_model(p, n_save=400, rtol=1e-8, atol=1e-10):
       - jac_sparsity: the Jacobian is tridiagonal; telling the solver saves
         it from finite-differencing a dense Nz x Nz matrix.
       - n_save = 400 output times => smooth dT(t) curves and accurate
-        trapezoid time-integrals in the energy check.
+        trapezoid time-integrals in the energy check. Only used to build the
+        default linear t_eval grid; ignored if t_eval is passed explicitly
+        (e.g. a log-spaced grid to resolve early times on a log-t plot).
       - semi_infinite: the domain is auto-deepened to SEMI_INF_PAD diffusive
         penetration depths so the insulated bottom is never felt (see the
         SEMI_INF_* constants). We rebind p via replace() so the returned p,
@@ -235,10 +237,13 @@ def solve_model(p, n_save=400, rtol=1e-8, atol=1e-10):
     dz = z[1] - z[0]
     u0 = np.zeros(p.Nz)                       # anomaly starts at zero
 
+    if t_eval is None:
+        t_eval = np.linspace(0.0, p.t_final, n_save)
+
     sparsity = diags([1, 1, 1], [-1, 0, 1], shape=(p.Nz, p.Nz))
     sol = solve_ivp(
         make_rhs(dz, p), t_span=(0.0, p.t_final), y0=u0, method="BDF",
-        t_eval=np.linspace(0.0, p.t_final, n_save),
+        t_eval=t_eval,
         rtol=rtol, atol=atol, jac_sparsity=sparsity,
     )
     if not sol.success:

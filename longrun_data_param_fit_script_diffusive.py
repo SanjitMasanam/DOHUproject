@@ -37,19 +37,37 @@ SENSITIVITY_N_SAVE = 100
 SENSITIVITY_RTOL = 1e-6
 SENSITIVITY_ATOL = 1e-8
 
+# Number of solver-saved points for the main kappa_pde/h_ml_pde fit and the
+# resulting "Best Fit" curve (both go through make_pde_dT's pde_dT closure).
+PDE_FIT_N_SAVE = 250
+
 # Progress/ETA tracking across the whole script (all run_types x results x models).
-RUN_TYPES = [1, 2, 3]
+RUN_TYPES = [3, 2, 1]
 RESULT_KINDS = ["validation", "unblinded"]
 _SCRIPT_START_TIME = time.time()
+
+def _log_spaced_t_eval(t_final_seconds, n_save):
+   """Log-spaced solver save grid: t=0, then year 1 to t_final log-spaced.
+
+   solve_model's default np.linspace(0, t_final, n_save) puts most of its
+   resolution at late times; over a multi-century t_final that leaves early
+   years (1-50) spanned by a single linear interpolation segment, which
+   badly understates the fast early rise wherever the result gets viewed on
+   a log-t axis (or fit against early-year data). Log-spacing puts the
+   saved points where the log-t curve actually needs them.
+   """
+   t_eval = np.concatenate(([0.0], np.geomspace(YEAR, t_final_seconds, n_save - 1)))
+   t_eval[-1] = t_final_seconds  # guard against fp round-off landing outside t_span
+   return t_eval
 
 
 def _sensitivity_solve_dT(kappa, h_ml, F_ref, T_eq, t_final_years, t_eval):
    """PDE surface response for one sensitivity-sweep (kappa, h_ml) point.
 
    Mirrors the per-point evaluation inside the main curve_fit target
-   (make_pde_dT below), but at loosened tolerance/n_save and as a
-   module-level function rather than a closure, so it can be dispatched to
-   the multiprocessing pool -- sweep points only populate diagnostic plots,
+   (make_pde_dT below), but at loosened tolerance and as a module-level
+   function rather than a closure, so it can be dispatched to the
+   multiprocessing pool -- sweep points only populate diagnostic plots,
    never the fitted kappa_pde/h_ml_pde themselves.
    """
    z_max = min(4000.0, max(2700.0, 6.0 * np.sqrt(kappa * t_final_years * YEAR)))
@@ -58,7 +76,10 @@ def _sensitivity_solve_dT(kappa, h_ml, F_ref, T_eq, t_final_years, t_eval):
       kappa=kappa, h_ml=h_ml, dT_eq=T_eq, F0=F_ref,
       z_max=z_max, Nz=nz, t_final=t_final_years * YEAR,
    )
-   sol = pde_solve_model(pde_p, n_save=SENSITIVITY_N_SAVE, rtol=SENSITIVITY_RTOL, atol=SENSITIVITY_ATOL)
+   sol = pde_solve_model(
+      pde_p, t_eval=_log_spaced_t_eval(pde_p.t_final, SENSITIVITY_N_SAVE),
+      rtol=SENSITIVITY_RTOL, atol=SENSITIVITY_ATOL,
+   )
    return np.interp(t_eval, sol["t"] / YEAR, sol["dT"])
 
 
@@ -499,7 +520,7 @@ for run_type in RUN_TYPES:
                         kappa=kappa, h_ml=h_ml, dT_eq=T_eq_, F0=F_ref_,
                         z_max=z_max, Nz=nz, t_final=t_final_yrs_ * YEAR,
                      )
-                     sol = pde_solve_model(pde_p, n_save=250)
+                     sol = pde_solve_model(pde_p, t_eval=_log_spaced_t_eval(pde_p.t_final, PDE_FIT_N_SAVE))
                      return np.interp(t_years, sol["t"] / YEAR, sol["dT"])
                   return pde_dT
 
