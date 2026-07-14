@@ -19,7 +19,7 @@ from pde_solver_1lyrEBM_diffusive import Params as PDEParams, solve_model as pde
 # the mixed-layer heat capacity vanish, which is singular in the PDE solver
 # (division by c_ml = rho_cp*h_ml), so approximate the limit with a tiny but
 # numerically well-behaved mixed layer instead of exactly zero.
-H_ML_PURELY_DIFFUSIVE = 1.0e-3  # m
+H_ML_PURELY_DIFFUSIVE = 1.0e-6  # m
 
 # Sensitivity sweep of the fitted kappa/h_ml around each model's best fit.
 SENSITIVITY_KAPPA_FACTOR_RANGE = (0.2, 5.0)   # multiplicative range around kappa_pde
@@ -470,6 +470,14 @@ for run_type in RUN_TYPES:
                T = popt[0]
                T_unc = perr[0]
 
+               # Diffusivity implied by the analytic (h_ml=0) fit's timescale
+               # T, so it can be reused below as the PDE's kappa in the
+               # h_ml->0 numerical limit (see pde_p_h0), keeping that curve
+               # on the same diffusivity as "Diffusive Analytical" rather
+               # than the joint fit's kappa_pde (which trades off against
+               # a nonzero h_ml_pde and need not match D).
+               D = T * 31536000 * (lmbda/((10**3)*(4.22*10**3)))**2
+
                popt, pcov = curve_fit(fit_func_ode, fit_t, fit_T)
                perr = np.sqrt(np.diag(pcov))
 
@@ -506,13 +514,19 @@ for run_type in RUN_TYPES:
                kappa_pde_unc, h_ml_pde_unc = perr
                pde_T = pde_dT_func(plot_t, kappa_pde, h_ml_pde) / T_eq
 
-               # Purely diffusive counterpart (h_ml -> 0, infinite ocean): same
-               # fitted kappa, but with the mixed-layer heat capacity taken to
-               # ~0, so the surface responds essentially instantaneously to
-               # the flux balance at the top of the thermocline, and the
-               # domain auto-deepened (semi_infinite) so the deep ocean keeps
-               # absorbing heat instead of hitting an insulated floor.
-               pde_p_h0 = PDEParams(kappa=kappa_pde, h_ml=H_ML_PURELY_DIFFUSIVE,
+               # Purely diffusive counterpart (h_ml -> 0, infinite ocean): uses
+               # D (the diffusivity implied by the analytic h_ml=0 fit above),
+               # not kappa_pde, so this curve is directly comparable to
+               # "Diffusive Analytical" -- kappa_pde comes from the joint
+               # two-parameter fit where it trades off against a nonzero
+               # h_ml_pde (equifinality) and so need not equal the diffusivity
+               # that actually fits the data in the h_ml->0 limit. The
+               # mixed-layer heat capacity is taken to ~0 so the surface
+               # responds essentially instantaneously to the flux balance at
+               # the top of the thermocline, and the domain is auto-deepened
+               # (semi_infinite) so the deep ocean keeps absorbing heat
+               # instead of hitting an insulated floor.
+               pde_p_h0 = PDEParams(kappa=D, h_ml=H_ML_PURELY_DIFFUSIVE,
                                      dT_eq=T_eq, F0=F_ref, t_final=t_final_years * YEAR,
                                      semi_infinite=True)
                sol_h0 = pde_solve_model(pde_p_h0, n_save=250)
@@ -664,8 +678,6 @@ for run_type in RUN_TYPES:
                ax.plot(plot_t, T_eq*pde_T_box, color="purple", ls="--",
                        label=r"1-Box Numerical ($\kappa=0$)")
 
-               D = T * 31536000 * (lmbda/((10**3)*(4.22*10**3)))**2
-
                # Add the slow-timescale parameter and a reference line at 150 years.
                ax.text(
                   0.02,
@@ -796,15 +808,37 @@ for run_type in RUN_TYPES:
          cbar = sens_rmse_figs[expt].colorbar(sm, ax=list(sens_rmse_axs[expt]), fraction=0.03, pad=0.02)
          cbar.set_label("RMSE vs. AOGCM Data (K)", fontsize=15, fontweight="bold")
 
-         # Save the kappa/h_ml sensitivity figures (single linear-time view; the
-         # heatmaps have no time axis to begin with).
-         sens_figs_to_save = [
-            (sens_kappa_figs[expt], "sensitivity_spaghetti_kappa"),
-            (sens_hml_figs[expt], "sensitivity_spaghetti_h_ml"),
+         # Save the kappa/h_ml spaghetti figures in both linear and log x-scale
+         # variants (mirroring the combined final figures above); the heatmaps
+         # have no time axis so they're saved once, as-is.
+         spaghetti_figs_to_save = [
+            (sens_kappa_figs[expt], sens_kappa_axs[expt], "sensitivity_spaghetti_kappa"),
+            (sens_hml_figs[expt], sens_hml_axs[expt], "sensitivity_spaghetti_h_ml"),
+         ]
+         for fig, axs, name in spaghetti_figs_to_save:
+            for scale in ["linear", "log"]:
+               for ax, xmax in zip(axs, final_xmax[expt]):
+                  ax.set_xscale(scale)
+                  ax.set_xlim(1, xmax + 1)
+                  if scale == "log":
+                     ax.xaxis.set_major_locator(mpl.ticker.LogLocator())
+
+               fig.savefig(
+                  outdir / current_dir / results / "png" / f"{expt}_all_models_{name}_{results}_{scale}{suffix}.png",
+                  dpi=200,
+                  bbox_inches="tight",
+               )
+               fig.savefig(
+                  outdir / current_dir / results / "pdf" / f"{expt}_all_models_{name}_{results}_{scale}{suffix}.pdf",
+                  bbox_inches="tight",
+               )
+            plt.close(fig)
+
+         heatmap_figs_to_save = [
             (sens_t63_figs[expt], "sensitivity_heatmap_t63"),
             (sens_rmse_figs[expt], "sensitivity_heatmap_rmse"),
          ]
-         for fig, name in sens_figs_to_save:
+         for fig, name in heatmap_figs_to_save:
             fig.savefig(
                outdir / current_dir / results / "png" / f"{expt}_all_models_{name}_{results}{suffix}.png",
                dpi=200,
