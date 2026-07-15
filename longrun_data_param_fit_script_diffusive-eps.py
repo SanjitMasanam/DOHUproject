@@ -79,8 +79,8 @@ EPS_FREF_FLOOR = 0.1             # W/m^2
 EPS_LAMBDA_FLOOR = 0.05          # W/m^2/K
 
 # Progress/ETA tracking across the whole script (all run_types x results x models).
-RUN_TYPES = [3, 2, 1]
-RESULT_KINDS = ["unblinded", "validation"]
+RUN_TYPES = [1, 2, 3]
+RESULT_KINDS = ["unblinded"]
 _SCRIPT_START_TIME = time.time()
 
 def _log_spaced_t_eval(t_final_seconds, n_save):
@@ -1119,11 +1119,31 @@ for run_type in RUN_TYPES:
                   np.mean(nettoa_plot[i:i + 10]) for i in range(nettoa_plot.shape[0] - 9)
                ])
                t_rollingMu = plot_t[: nettoa_rollingMu.shape[0]]
-               N_pde = F_ref - lmbda * (T_eq * pde_T)
+               # TOA imbalance of the PDE fit, including the efficacy term
+               # (matches the OHC panel's N_pde and the 3D-plane relation).
+               N_pde = F_ref - lmbda * (T_eq * pde_T) - (eps - 1.0) * H_plot
+
+               # TOA imbalance from the same radiative relation but fed the
+               # ACTUAL AOGCM T2m timeseries (T_eq*plot_T) instead of the PDE-fit
+               # temperature: N = F - lambda*T - (eps-1)*H, with the fitted
+               # efficacy and PDE heat uptake H. T2m and H are 10-yr rolling-
+               # averaged to match the (smoothed) black AOGCM curve, otherwise
+               # raw year-to-year T2m noise makes this line unreadable on the log
+               # axis. This should hug the observed NETTOA if the fit is good.
+               T_aogcm_abs = T_eq * plot_T
+               T_aogcm_roll = np.array([
+                  np.mean(T_aogcm_abs[i:i + 10]) for i in range(T_aogcm_abs.shape[0] - 9)
+               ])
+               H_roll = np.array([
+                  np.mean(H_plot[i:i + 10]) for i in range(H_plot.shape[0] - 9)
+               ])
+               N_aogcm_eps = F_ref - lmbda * T_aogcm_roll - (eps - 1.0) * H_roll
 
                ax = nettoa_axs[expt][nettoa_idx[expt]]
                ax.plot(t_rollingMu, nettoa_rollingMu, color="black", label="AOGCM")
                ax.plot(plot_t, N_pde, color="purple", label="1-Box + Diffusion Fit")
+               ax.plot(t_rollingMu, N_aogcm_eps, color="darkorange", ls="--",
+                       label=r"$F-\lambda T_{AOGCM}-(\epsilon-1) H$ (10-yr mean)")
                format_ax(ax, text=f"{model}", xscale="linear", yscale="log", legend_loc="lower left")
                nettoa_idx[expt] += 1
 
