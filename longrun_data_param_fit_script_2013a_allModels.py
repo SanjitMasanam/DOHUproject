@@ -11,6 +11,12 @@ from matplotlib.lines import Line2D
 from tqdm import tqdm
 from matplotlib.ticker import MultipleLocator
 
+# Font used for every label/tick/legend on every plot in this script -- change
+# this one value to switch fonts everywhere (falls back to matplotlib's
+# default sans font if the named font isn't installed on this machine).
+PLOT_FONT_FAMILY = "Tahoma"
+mpl.rcParams["font.family"] = PLOT_FONT_FAMILY
+
 def format_ax(ax, title="", xlabel="", ylabel="", text="",
             xscale="linear", yscale="linear",
             xlim=None, ylim=None,

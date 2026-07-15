@@ -15,6 +15,12 @@ from scipy.special import erfcx
 from scipy.optimize import curve_fit
 from pde_solver_1lyrEBM_diffusive import Params as PDEParams, solve_model as pde_solve_model, YEAR
 
+# Font used for every label/tick/legend on every plot in this script -- change
+# this one value to switch fonts everywhere (falls back to matplotlib's
+# default sans font if the named font isn't installed on this machine).
+PLOT_FONT_FAMILY = "Tahoma"
+mpl.rcParams["font.family"] = PLOT_FONT_FAMILY
+
 # "Purely diffusive" limit of the 1-box + diffusive model: h_ml -> 0 makes
 # the mixed-layer heat capacity vanish, which is singular in the PDE solver
 # (division by c_ml = rho_cp*h_ml), so approximate the limit with a tiny but
@@ -29,6 +35,12 @@ SENSITIVITY_N_2D = 9                          # points per axis in the joint gri
 SENSITIVITY_KAPPA_BOUNDS = (1e-7, 1e-3)       # matches the curve_fit bounds below
 SENSITIVITY_HML_BOUNDS = (10.0, 2000.0)
 
+# Grid-resolution sensitivity sweep: target vertical spacing dz, with kappa
+# and h_ml held at their best-fit values (unlike the kappa/h_ml sweeps above,
+# this isn't a physical-parameter sweep -- it's a numerical-convergence check
+# on the fit itself).
+SENSITIVITY_DZ_RANGE = (10.0, 1000.0)          # target dz range [m] for the sweep
+
 # Diagnostic-only solver settings for the sensitivity sweep: looser tolerance
 # and fewer saved points than the actual kappa_pde/h_ml_pde fit (n_save=250,
 # rtol=1e-8), since these solves only feed spaghetti/heatmap plots and never
@@ -40,6 +52,12 @@ SENSITIVITY_ATOL = 1e-8
 # Number of solver-saved points for the main kappa_pde/h_ml_pde fit and the
 # resulting "Best Fit" curve (both go through make_pde_dT's pde_dT closure).
 PDE_FIT_N_SAVE = 250
+
+# Target vertical grid spacing [m] for the main kappa_pde/h_ml_pde fit's PDE
+# solves (make_pde_dT below). Nz is derived from z_max/PDE_FIT_DZ_TARGET and
+# clamped to [121, 401] points, so shrinking this refines the grid (up to the
+# clamp) to probe grid-resolution sensitivity of the fit.
+PDE_FIT_DZ_TARGET = 15.0
 
 # Progress/ETA tracking across the whole script (all run_types x results x models).
 RUN_TYPES = [3, 2, 1]
@@ -61,17 +79,20 @@ def _log_spaced_t_eval(t_final_seconds, n_save):
    return t_eval
 
 
-def _sensitivity_solve_dT(kappa, h_ml, F_ref, T_eq, t_final_years, t_eval):
-   """PDE surface response for one sensitivity-sweep (kappa, h_ml) point.
+def _sensitivity_solve_dT(kappa, h_ml, F_ref, T_eq, t_final_years, t_eval, dz_target=15.0):
+   """PDE surface response for one sensitivity-sweep (kappa, h_ml, dz) point.
 
    Mirrors the per-point evaluation inside the main curve_fit target
    (make_pde_dT below), but at loosened tolerance and as a module-level
    function rather than a closure, so it can be dispatched to the
    multiprocessing pool -- sweep points only populate diagnostic plots,
-   never the fitted kappa_pde/h_ml_pde themselves.
+   never the fitted kappa_pde/h_ml_pde themselves. dz_target defaults to the
+   same spacing as the main fit; the dz sensitivity sweep overrides it
+   directly (unclamped, so the full requested range from coarse to fine is
+   actually exercised) while the kappa/h_ml sweeps leave it at the default.
    """
    z_max = min(4000.0, max(2700.0, 6.0 * np.sqrt(kappa * t_final_years * YEAR)))
-   nz = int(min(401, max(121, z_max / 15.0 + 1)))
+   nz = int(z_max / dz_target + 1)
    pde_p = PDEParams(
       kappa=kappa, h_ml=h_ml, dT_eq=T_eq, F0=F_ref,
       z_max=z_max, Nz=nz, t_final=t_final_years * YEAR,
@@ -259,6 +280,9 @@ for run_type in RUN_TYPES:
       sens_hml_figs = {}
       sens_hml_axs = {}
       sens_hml_idx = {}
+      sens_dz_figs = {}
+      sens_dz_axs = {}
+      sens_dz_idx = {}
       sens_t63_figs = {}
       sens_t63_axs = {}
       sens_t63_idx = {}
@@ -270,6 +294,7 @@ for run_type in RUN_TYPES:
       # (populated per subplot below, normalized/colorbarred after all models).
       sens_kappa_lines = {}   # list of (Line2D, kappa_value) per expt
       sens_hml_lines = {}     # list of (Line2D, h_ml_value) per expt
+      sens_dz_lines = {}      # list of (Line2D, dz_value) per expt
       sens_t63_meshes = {}    # list of (QuadMesh, grid) per expt
       sens_rmse_meshes = {}   # list of (QuadMesh, grid) per expt
 
@@ -295,6 +320,9 @@ for run_type in RUN_TYPES:
          sens_hml_figs[expt], sens_hml_axs[expt] = make_model_grid(models, title=r"Sensitivity to h$_{ml}$ ($\kappa$ held at best fit)", xlabel="Time (years)", ylabel="Equilibrium Ratio ($T/T_{eq}$)")
          sens_hml_idx[expt] = 0
 
+         sens_dz_figs[expt], sens_dz_axs[expt] = make_model_grid(models, title=r"Sensitivity to Grid Spacing dz ($\kappa$, h$_{ml}$ held at best fit)", xlabel="Time (years)", ylabel="Equilibrium Ratio ($T/T_{eq}$)")
+         sens_dz_idx[expt] = 0
+
          sens_t63_figs[expt], sens_t63_axs[expt] = make_model_grid(models, title=r"Years to Reach 63% of T$_{eq}$ vs. $\kappa$/h$_{ml}$", xlabel=r"$\kappa$ (m$^2$/s)", ylabel=r"h$_{ml}$ (m)")
          sens_t63_idx[expt] = 0
 
@@ -303,6 +331,7 @@ for run_type in RUN_TYPES:
 
          sens_kappa_lines[expt] = []
          sens_hml_lines[expt] = []
+         sens_dz_lines[expt] = []
          sens_t63_meshes[expt] = []
          sens_rmse_meshes[expt] = []
 
@@ -522,10 +551,10 @@ for run_type in RUN_TYPES:
                # parameters.
                t_final_years = max(fit_t.max(), plot_t.max())
 
-               def make_pde_dT(F_ref_, T_eq_, t_final_yrs_):
+               def make_pde_dT(F_ref_, T_eq_, t_final_yrs_, dz_target_=15.0):
                   def pde_dT(t_years, kappa, h_ml):
                      z_max = min(4000.0, max(2700.0, 6.0 * np.sqrt(kappa * t_final_yrs_ * YEAR)))
-                     nz = int(min(401, max(121, z_max / 15.0 + 1)))
+                     nz = int(z_max / dz_target_ + 1)
                      pde_p = PDEParams(
                         kappa=kappa, h_ml=h_ml, dT_eq=T_eq_, F0=F_ref_,
                         z_max=z_max, Nz=nz, t_final=t_final_yrs_ * YEAR,
@@ -534,10 +563,10 @@ for run_type in RUN_TYPES:
                      return np.interp(t_years, sol["t"] / YEAR, sol["dT"])
                   return pde_dT
 
-               pde_dT_func = make_pde_dT(F_ref, T_eq, t_final_years)
+               pde_dT_func = make_pde_dT(F_ref, T_eq, t_final_years, dz_target_=PDE_FIT_DZ_TARGET)
                popt, pcov = curve_fit(
                   pde_dT_func, fit_t, fit_T * T_eq,
-                  p0=[1.0e-4, 100.0], bounds=([1e-7, 1], [1e-3, 300.0]), max_nfev=60,
+                  p0=[1.0e-4, 100.0], bounds=([1e-7, 1e-3], [1e-3, 300.0]), max_nfev=60,
                )
                perr = np.sqrt(np.diag(pcov))
 
@@ -627,6 +656,20 @@ for run_type in RUN_TYPES:
                   )
                ]
 
+               # Grid-resolution sweep: kappa/h_ml held at their best fit, only
+               # the target vertical spacing dz varies (see SENSITIVITY_DZ_RANGE).
+               # Unlike the two sweeps above, this isn't probing equifinality in
+               # the physical parameters -- it's checking whether the fitted
+               # kappa_pde/h_ml_pde curve has actually converged w.r.t. the PDE's
+               # numerical grid, or whether coarser dz would have changed it.
+               dz_grid_1d = np.geomspace(SENSITIVITY_DZ_RANGE[0], SENSITIVITY_DZ_RANGE[1], SENSITIVITY_N_1D)
+               dz_sweep_curves = [
+                  c / T_eq for c in _SENS_POOL.starmap(
+                     _sensitivity_solve_dT,
+                     [(kappa_pde, h_ml_pde, F_ref, T_eq, t_final_years, plot_t, dz) for dz in dz_grid_1d],
+                  )
+               ]
+
                # Joint 2-D grid, shared by both heatmaps below: one PDE solve per
                # cell (on a common fine time grid), then both metrics (time to 63%
                # of T_eq, and RMSE against the AOGCM fit data) are derived from
@@ -695,7 +738,27 @@ for run_type in RUN_TYPES:
                )
                sens_hml_idx[expt] += 1
 
-               # --- Panel 3: years-to-63%-of-T_eq heatmap over (kappa, h_ml) ---
+               # --- Panel 3: dz spaghetti (sequential purple ramp = dz) ---
+               ax = sens_dz_axs[expt][sens_dz_idx[expt]]
+               for dz_val, curve in zip(dz_grid_1d, dz_sweep_curves):
+                  (line,) = ax.plot(plot_t, curve, lw=1.2, alpha=0.85)
+                  sens_dz_lines[expt].append((line, dz_val))
+               ax.scatter(plot_t, plot_T, s=4, color="red", label="AOGCM", zorder=4)
+               ax.plot(plot_t, pde_T, color="black", lw=2, label="Best Fit", zorder=5)
+               format_ax(ax, text=f"{model}", xscale="linear", yscale="linear", legend_loc="lower right")
+               ax.text(
+                  0.02,
+                  0.92,
+                  rf"$\kappa$ = {kappa_pde:.2e} m$^2$/s, h$_{{ml}}$ = {h_ml_pde:.0f} m (fixed)",
+                  transform=ax.transAxes,
+                  va="top",
+                  ha="left",
+                  fontsize=8,
+                  bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4),
+               )
+               sens_dz_idx[expt] += 1
+
+               # --- Panel 4: years-to-63%-of-T_eq heatmap over (kappa, h_ml) ---
                # Norm is applied figure-wide after the loop so every model shares
                # one color scale and one colorbar.
                ax = sens_t63_axs[expt][sens_t63_idx[expt]]
@@ -706,7 +769,7 @@ for run_type in RUN_TYPES:
                format_ax(ax, text=f"{model}", xscale="log", yscale="linear", legend=False, grid=False)
                sens_t63_idx[expt] += 1
 
-               # --- Panel 4: RMSE-vs-data heatmap over (kappa, h_ml) ---
+               # --- Panel 5: RMSE-vs-data heatmap over (kappa, h_ml) ---
                # This is the cost surface curve_fit minimized: a sharp minimum at
                # the star means kappa/h_ml are well-constrained; a shallow ridge
                # through the star means the two parameters trade off (equifinality).
@@ -722,13 +785,13 @@ for run_type in RUN_TYPES:
                ax = final_axs[expt][final_idx[expt]]
                ax.scatter(plot_t, T_eq*plot_T, s=4, color="red")
                ax.plot(plot_t, T_eq*plot_T, color="red", label="2-m Surface Temp.")
-               ax.plot(plot_t, T_eq*fit_func_ode(plot_t, tau), color="green", label="1-Box Analytical")
-               ax.plot(plot_t, T_eq*fit_func_diff(plot_t, T), color="blue", label="Diffusive Analytical")
+               # ax.plot(plot_t, T_eq*fit_func_ode(plot_t, tau), color="green", label="1-Box Analytical")
+               # ax.plot(plot_t, T_eq*fit_func_diff(plot_t, T), color="blue", label="Diffusive Analytical")
                ax.plot(plot_t, T_eq*pde_T, color="purple", label="1-Box + Diffusion Fit")
-               ax.plot(plot_t, T_eq*pde_T_h0, color="purple", ls="-.",
-                       label=r"Diffusive Numerical (h$_{ml}\to0$, $\infty$ ocean)")
-               ax.plot(plot_t, T_eq*pde_T_box, color="purple", ls="--",
-                       label=r"1-Box Numerical ($\kappa=0$)")
+               # ax.plot(plot_t, T_eq*pde_T_h0, color="purple", ls="-.",
+               #         label=r"Diffusive Numerical (h$_{ml}\to0$, $\infty$ ocean)")
+               # ax.plot(plot_t, T_eq*pde_T_box, color="purple", ls="--",
+               #         label=r"1-Box Numerical ($\kappa=0$)")
 
                # Add the slow-timescale parameter and a reference line at 150 years.
                ax.text(
@@ -850,7 +913,7 @@ for run_type in RUN_TYPES:
          plt.close(final_figs[expt])
          plt.close(nettoa_figs[expt])
 
-         # --- Shared colorbars for the 4 sensitivity figures ---
+         # --- Shared colorbars for the 5 sensitivity figures ---
          # Put every subplot of a given figure on one common color scale, then
          # draw a single bolded colorbar spanning all panels on the right. The
          # two spaghetti figures are recolored to their figure-wide norm here.
@@ -872,6 +935,15 @@ for run_type in RUN_TYPES:
          cbar = sens_hml_figs[expt].colorbar(sm, ax=list(sens_hml_axs[expt]), fraction=0.03, pad=0.02)
          cbar.set_label(r"h$_{ml}$ (m)", fontsize=15, fontweight="bold")
 
+         dz_vals = np.array([v for _, v in sens_dz_lines[expt]])
+         dz_norm = mpl.colors.LogNorm(vmin=dz_vals.min(), vmax=dz_vals.max())
+         for line, v in sens_dz_lines[expt]:
+            line.set_color(plt.cm.Purples(0.25 + 0.65 * dz_norm(v)))
+         sm = mpl.cm.ScalarMappable(norm=dz_norm, cmap=plt.cm.Purples)
+         sm.set_array([])
+         cbar = sens_dz_figs[expt].colorbar(sm, ax=list(sens_dz_axs[expt]), fraction=0.03, pad=0.02)
+         cbar.set_label("dz (m)", fontsize=15, fontweight="bold")
+
          t63_min = np.nanmin([np.nanmin(g) for _, g in sens_t63_meshes[expt]])
          t63_max = np.nanmax([np.nanmax(g) for _, g in sens_t63_meshes[expt]])
          t63_norm = mpl.colors.Normalize(vmin=t63_min, vmax=t63_max)
@@ -892,12 +964,13 @@ for run_type in RUN_TYPES:
          cbar = sens_rmse_figs[expt].colorbar(sm, ax=list(sens_rmse_axs[expt]), fraction=0.03, pad=0.02)
          cbar.set_label("RMSE vs. AOGCM Data (K)", fontsize=15, fontweight="bold")
 
-         # Save the kappa/h_ml spaghetti figures in both linear and log x-scale
+         # Save the kappa/h_ml/dz spaghetti figures in both linear and log x-scale
          # variants (mirroring the combined final figures above); the heatmaps
          # have no time axis so they're saved once, as-is.
          spaghetti_figs_to_save = [
             (sens_kappa_figs[expt], sens_kappa_axs[expt], "sensitivity_spaghetti_kappa"),
             (sens_hml_figs[expt], sens_hml_axs[expt], "sensitivity_spaghetti_h_ml"),
+            (sens_dz_figs[expt], sens_dz_axs[expt], "sensitivity_spaghetti_dz"),
          ]
          for fig, axs, name in spaghetti_figs_to_save:
             for scale in ["linear", "log"]:

@@ -30,12 +30,19 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib as mpl
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers the '3d' projection)
 import rpy2.robjects as ro
 import sympy as sp
 from matplotlib.lines import Line2D
 from scipy.optimize import curve_fit
 
 # ------------------------- User settings -------------------------
+
+# Font used for every label/tick/legend on every plot in this script -- change
+# this one value to switch fonts everywhere (falls back to matplotlib's
+# default sans font if the named font isn't installed on this machine).
+PLOT_FONT_FAMILY = "Tahoma"
+mpl.rcParams["font.family"] = PLOT_FONT_FAMILY
 
 # Use at least 3 iterations to match your original script, but allow convergence.
 MIN_ITERATIONS = 3
@@ -217,6 +224,52 @@ for run_type in [2, 1, 3]:
             (outdir / current_dir / section / "png").mkdir(parents=True, exist_ok=True)
             (outdir / current_dir / section / "pdf").mkdir(parents=True, exist_ok=True)
          (outdir / current_dir / "tables").mkdir(parents=True, exist_ok=True)
+
+
+      def make_model_grid_3d(models, title=None, width_per_ax=6, height_per_ax=5, ncols=4, nrows=2):
+         """4x2 grid of 3D axes (mirrors make_model_grid's layout), for the
+         (T, H, N) radiative-regression scatter + fit-plane panels."""
+         fig, axs = plt.subplots(
+            nrows, ncols,
+            figsize=(width_per_ax * ncols, height_per_ax * nrows),
+            subplot_kw={"projection": "3d"},
+         )
+         fig.subplots_adjust(left=0.02, right=0.95, bottom=0.03, top=0.92, wspace=0.10, hspace=0.10)
+         if title:
+            fig.suptitle(title, fontsize=20, fontweight="bold")
+         return fig, np.asarray(axs).ravel()
+
+
+      def plot_regression_3d(ax, T, H, N, F, lam, eps, model, cmap="RdBu_r", resid_norm=None):
+         """Scatter the AOGCM (T, H, N) points and overlay the multilinear
+         regression plane N = F - lam*T - (eps-1)*H. Points are colored by the
+         signed residual (obs - plane) so the panel shows both the geometry of
+         the fit and how tightly the data hug it. Returns (scatter, residuals)
+         so the caller can apply one shared symmetric color scale across models.
+         """
+         Nfit = F - lam * T - (eps - 1.0) * H
+         resid = N - Nfit
+         ss_res = float(np.sum(resid ** 2))
+         ss_tot = float(np.sum((N - np.mean(N)) ** 2))
+         r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
+         rmse = float(np.sqrt(np.mean(resid ** 2)))
+
+         sc = ax.scatter(T, H, N, c=resid, cmap=cmap, norm=resid_norm, s=10, depthshade=False)
+
+         Tg, Hg = np.meshgrid(
+            np.linspace(np.min(T), np.max(T), 12),
+            np.linspace(np.min(H), np.max(H), 12),
+         )
+         Ng = F - lam * Tg - (eps - 1.0) * Hg
+         ax.plot_surface(Tg, Hg, Ng, color="0.5", alpha=0.25, linewidth=0, antialiased=True)
+
+         ax.set_xlabel("T (K)", fontsize=9)
+         ax.set_ylabel(r"H (W m$^{-2}$)", fontsize=9)
+         ax.set_zlabel("N (W m$^{-2}$)", fontsize=9)
+         ax.tick_params(labelsize=7)
+         ax.set_title(rf"{model}: $\epsilon$={eps:.2f}, $R^2$={r2:.3f}, RMSE={rmse:.3f}",
+                      fontsize=10, fontweight="bold")
+         return sc, resid
 
 
       def as_1d_float(x):
@@ -836,6 +889,50 @@ for run_type in [2, 1, 3]:
       # can cross-reference tau_s from the other two run_types' results.
       df.to_csv(outdir / current_dir / "fitted_model_params.csv", index=False)
       print(df)
+
+      # ------------------------- 3D view of the radiative regression -------------------------
+      # Visualize the converged multilinear fit N = F - lambda*T - (eps-1)*H as
+      # a plane in (T, H, N) space, per model, with the AOGCM data scattered on
+      # top and colored by signed residual (obs - plane). This is the exact
+      # relationship fit_radiative_epsilon regresses; the plot shows how planar
+      # the data really are and how tightly they hug the fit.
+      fig3d, axs3d = make_model_grid_3d(
+         models,
+         title=r"EBM-$\epsilon$ radiative fit: N = F $-\ \lambda$T $-\ (\epsilon-1)$H",
+      )
+      reg3d_scatters = []
+      for imodel, model in enumerate(models):
+         bundle = series_by_model[model]
+         row = df.loc[df["model"] == model].iloc[0]
+         F = float(row["F_ref"]); lam = float(row["lambda"]); eps = float(row["epsilon"])
+         # H self-consistent with the final params (same call the last iteration used).
+         H = H_physical_from_previous_solution(
+            bundle.t_full,
+            F_ref=F, lmbda=lam, C=float(row["C"]), epsilon=eps,
+            T_eq=float(row["T_eq"]), a_f=float(row["a_f"]), a_s=float(row["a_s"]),
+            tau_f=float(row["tau_f"]), tau_s=float(row["tau_s"]),
+         )
+         T, N = bundle.T_full, bundle.N_full
+         good = finite_pair_mask(T, N, H)
+         sc, resid = plot_regression_3d(axs3d[imodel], T[good], H[good], N[good], F, lam, eps, model)
+         reg3d_scatters.append((sc, resid))
+
+      # One shared, symmetric (diverging) residual color scale across all panels.
+      all_resid = np.concatenate([r for _, r in reg3d_scatters]) if reg3d_scatters else np.array([0.0])
+      rmax = float(np.nanmax(np.abs(all_resid))) or 1.0
+      resid_norm = mpl.colors.Normalize(vmin=-rmax, vmax=rmax)
+      for sc, _ in reg3d_scatters:
+         sc.set_norm(resid_norm)
+      smap = mpl.cm.ScalarMappable(norm=resid_norm, cmap="RdBu_r")
+      smap.set_array([])
+      cbar = fig3d.colorbar(smap, ax=list(axs3d), fraction=0.015, pad=0.02)
+      cbar.set_label(r"N residual (obs $-$ fit) [W m$^{-2}$]", fontsize=13, fontweight="bold")
+      for ext, kw in (("png", {"dpi": 200}), ("pdf", {})):
+         fig3d.savefig(
+            outdir / current_dir / "step1" / ext / f"4xCO2_all_models_N_T_H_regression3d{run_type_suffix}.{ext}",
+            bbox_inches="tight", **kw,
+         )
+      plt.close(fig3d)
 
       # ------------------------- Compare parameters to paper values -------------------------
 

@@ -140,6 +140,11 @@ class Params:
     h_ml: float = 110.0                # mixed layer depth [m]
     dT_eq: float = 4.2                 # equilibrium warming for 2xCO2 [C]
     F0: float = 4.3                    # flux into ocean at t=0 [W/m^2]
+    epsilon: float = 1.0               # deep-ocean heat-uptake efficacy
+                                       # (Geoffroy 2013b): the surface budget
+                                       # loses eps*H while the interior receives
+                                       # the unscaled diffusive flux H. 1.0 = off
+                                       # (recovers the plain diffusive model).
     rho_cp: float = 4.186e6            # vol. heat capacity of seawater [J m^-3 K^-1]
     z_max: float = 2700.0              # domain depth [m]; >> diffusive penetration
     Nz: int = 241                      # grid points => dz = 11.25 m
@@ -184,11 +189,17 @@ def make_rhs(dz, p):
         T0 = u[0]
 
         # --- surface node: mixed-layer energy budget -------------------
-        # F0 - lam*T0        : net radiative flux into the ocean (Eq. 24)
-        # + D*(u[1]-T0)/dz   : diffusive exchange with the thermocline.
+        # F0 - lam*T0            : net radiative flux into the ocean (Eq. 24)
+        # + eps*D*(u[1]-T0)/dz   : diffusive exchange with the thermocline,
+        #   scaled by the heat-uptake efficacy eps (Geoffroy 2013b). eps=1
+        #   is the plain diffusive model; eps>1 makes the deep uptake more
+        #   effective at cooling the surface than a 1:1 balance would give.
         #   Sign: if the slab is warmer than the water below, (u[1]-T0) < 0
-        #   and the slab loses heat downward, as it must.
-        du[0] = (p.F0 - p.lam * T0 + p.D * (u[1] - T0) / dz) / p.c_ml
+        #   and the slab loses heat downward, as it must. Note the INTERIOR
+        #   (du[1:-1]) is deliberately left unscaled, so the surface loses
+        #   eps*H while the thermocline receives H -- the (eps-1)*H imbalance
+        #   is the extra top-of-atmosphere response.
+        du[0] = (p.F0 - p.lam * T0 + p.epsilon * p.D * (u[1] - T0) / dz) / p.c_ml
 
         # --- interior nodes: plain diffusion ----------------------------
         du[1:-1] = p.kappa * (u[2:] - 2.0 * u[1:-1] + u[:-2]) / dz**2
