@@ -1094,10 +1094,10 @@ for run_type in RUN_TYPES:
                # evaluated over plot_t (not extended to equilibrium), same as
                # the AOGCM data it's compared against.
                if results == 'unblinded':
-                  normalized_OHC = (5.1e14 * 31536000 * np.cumsum(nettoa)) / (1.37e21 * 3850)
+                  normalized_OHC = (5.1e14 * 31536000 * np.cumsum(nettoa)) / (1.37e21 * 2700.0)
 
                   N_pde = F_ref - lmbda * (T_eq * pde_T) - (eps - 1.0) * H_plot
-                  normalized_OHC_pred = (5.1e14 * 31536000 * np.cumsum(N_pde)) / (1.37e21 * 3850)
+                  normalized_OHC_pred = (5.1e14 * 31536000 * np.cumsum(N_pde)) / (1.37e21 * 2700.0)
 
                   cmap = plt.cm.turbo
                   norm = mpl.colors.Normalize(vmin=0, vmax=6000)

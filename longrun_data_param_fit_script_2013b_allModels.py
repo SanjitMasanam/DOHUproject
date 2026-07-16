@@ -684,10 +684,11 @@ for run_type in [2, 1, 3]:
 
 
       def plot_radiative_fit_H(ax, bundle, fit_params, H_prev, model):
-         """Net TOA vs. ocean heat uptake H, with the pure-efficacy line
-         N = F-(eps-1)*H and the full regression evaluated at each point's own
-         T, N = F - lambda*T - (eps-1)*H. No H_prev exists before the first
-         EBM-epsilon iteration (Gregory-only), so the panel is left blank then.
+         """Net TOA vs. ocean heat uptake H, with the pure-efficacy term
+         N = -(eps-1)*H and the full regression evaluated at each point's own
+         T, N = F - lambda*T - (eps-1)*H. Points are plotted in series order (H
+         is not sorted). No H_prev exists before the first EBM-epsilon iteration
+         (Gregory-only), so the panel is left blank then.
          """
          if H_prev is None:
             format_ax(ax, text=model, xscale="linear", yscale="linear", legend=False)
@@ -701,11 +702,11 @@ for run_type in [2, 1, 3]:
 
          ax.scatter(H_prev, N, s=8, alpha=0.5, label="AOGCM")
 
-         order = np.argsort(H_prev)
-         H_sorted = H_prev[order]
-         ax.plot(H_sorted, F_ref - (epsilon - 1.0) * H_sorted, color="0.4", lw=2, ls=":",
-                 label=rf"$N=F-(\epsilon-1)H$ ($\epsilon$={epsilon:.2f})")
-         ax.plot(H_sorted, F_ref - lmbda * T[order] - (epsilon - 1.0) * H_sorted,
+         one_one = np.array([H_prev.min(), H_prev.max()])
+         ax.plot(one_one, one_one, color="0.5", lw=1.0, ls="-.", label="1:1")
+         ax.plot(H_prev, -(epsilon - 1.0) * H_prev, color="0.4", lw=2, ls=":",
+                 label=rf"$N=-(\epsilon-1)H$ ($\epsilon$={epsilon:.2f})")
+         ax.plot(H_prev, F_ref - lmbda * T - (epsilon - 1.0) * H_prev,
                  color="green", lw=2, ls="--",
                  label=r"$N=F-\lambda T-(\epsilon-1)H$")
          format_ax(ax, text=model, xscale="linear", yscale="linear")

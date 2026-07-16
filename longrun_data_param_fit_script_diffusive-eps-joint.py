@@ -1173,22 +1173,22 @@ for run_type in RUN_TYPES:
                ax1 = step1_ax_by_model[model]
                order = np.argsort(T_reg_arr)
                ax1.plot(T_reg_arr[order], N_eps_reg[order], color="green", lw=2, ls="--",
-                        label=rf"w/ $\epsilon H$: $\epsilon$={eps:.2f} (RMSE={rmse_eps:.3f})")
+                        label=rf"w/ $(\epsilon-1)H$: $\epsilon$={eps:.2f} (RMSE={rmse_eps:.3f})")
                ax1.legend(loc="upper right", prop={"weight": "bold", "size": 8})
 
                # ----- STEP 1 (N vs H) panel: fit of N against the ocean heat -----
-               # uptake H, with the pure-efficacy line N = F-(eps-1)*H and the
+               # uptake H, with the pure-efficacy term N = -(eps-1)*H and the
                # full regression plane evaluated at each point's own T,
-               # N = F - lambda*T - (eps-1)*H, both plotted vs. H over the
-               # same regression rows the efficacy fit used.
-               order_H = np.argsort(H_reg_final)
-               H_sorted = H_reg_final[order_H]
-               N_eps_line = F_ref - lmbda * T_reg_arr[order_H] - (eps - 1.0) * H_sorted
+               # N = F - lambda*T - (eps-1)*H, both plotted vs. H over the same
+               # regression rows the efficacy fit used (in series order, H unsorted).
+               N_eps_line = F_ref - lmbda * T_reg_arr - (eps - 1.0) * H_reg_final
                ax_nh = step1_NH_ax_by_model[model]
                ax_nh.scatter(H_reg_final, N_reg, s=8, alpha=0.5, label="Data")
-               ax_nh.plot(H_sorted, F_ref - (eps - 1.0) * H_sorted, color="0.4", lw=2, ls=":",
-                          label=rf"$N=F-(\epsilon-1) H$ ($\epsilon$={eps:.2f})")
-               ax_nh.plot(H_sorted, N_eps_line, color="green", lw=2, ls="--",
+               one_one = np.array([H_reg_final.min(), H_reg_final.max()])
+               ax_nh.plot(one_one, one_one, color="0.5", lw=1.0, ls="-.", label="1:1")
+               ax_nh.plot(H_reg_final, -(eps - 1.0) * H_reg_final, color="0.4", lw=2, ls=":",
+                          label=rf"$N=-(\epsilon-1) H$ ($\epsilon$={eps:.2f})")
+               ax_nh.plot(H_reg_final, N_eps_line, color="green", lw=2, ls="--",
                           label=r"$N=F-\lambda T-(\epsilon-1) H$")
                format_ax(ax_nh, text=f"{model}", xscale="linear", yscale="linear",
                          legend_loc="upper right")
@@ -1259,10 +1259,10 @@ for run_type in RUN_TYPES:
                # evaluated over plot_t (not extended to equilibrium), same as
                # the AOGCM data it's compared against.
                if results == 'unblinded':
-                  normalized_OHC = (5.1e14 * 31536000 * np.cumsum(nettoa)) / (1.37e21 * 3850)
+                  normalized_OHC = (5.1e14 * 31536000 * np.cumsum(nettoa)) / (1.37e21 * 2700.0)
 
                   N_pde = F_ref - lmbda * (T_eq * pde_T) - (eps - 1.0) * H_plot
-                  normalized_OHC_pred = (5.1e14 * 31536000 * np.cumsum(N_pde)) / (1.37e21 * 3850)
+                  normalized_OHC_pred = (5.1e14 * 31536000 * np.cumsum(N_pde)) / (1.37e21 * 2700.0)
 
                   cmap = plt.cm.turbo
                   norm = mpl.colors.Normalize(vmin=0, vmax=6000)
