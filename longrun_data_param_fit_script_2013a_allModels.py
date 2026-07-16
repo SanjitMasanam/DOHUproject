@@ -17,6 +17,13 @@ from matplotlib.ticker import MultipleLocator
 PLOT_FONT_FAMILY = "Tahoma"
 mpl.rcParams["font.family"] = PLOT_FONT_FAMILY
 
+# --- shared plot-styling sizes (keep identical across all longrun scripts) ---
+AXIS_LABEL_FONTSIZE  = 22   # figure-level x/y axis + side labels (was 18)
+PANEL_AXIS_FONTSIZE  = 13   # small per-panel axis labels: 3D x/y/z, format_ax (was 9/default)
+MODEL_LABEL_FONTSIZE = 15   # bold top-left model tag
+EXTRA_TEXT_FONTSIZE  = 12   # param boxes under the model tag (was 8)
+# NOTE: plot titles are intentionally left at their current sizes.
+
 def format_ax(ax, title="", xlabel="", ylabel="", text="",
             xscale="linear", yscale="linear",
             xlim=None, ylim=None,
@@ -24,13 +31,14 @@ def format_ax(ax, title="", xlabel="", ylabel="", text="",
             xspacing=True, yspacing=True,
             legend=True, legend_loc='upper right', grid=True):
 
-   ax.set(title=title, xlabel=xlabel, ylabel=ylabel,
-         xscale=xscale, yscale=yscale,
-         xlim=xlim, ylim=ylim)
+   ax.set(xscale=xscale, yscale=yscale, xlim=xlim, ylim=ylim)
+   if title:  ax.set_title(title, fontweight="bold")
+   if xlabel: ax.set_xlabel(xlabel, fontweight="bold", fontsize=PANEL_AXIS_FONTSIZE)
+   if ylabel: ax.set_ylabel(ylabel, fontweight="bold", fontsize=PANEL_AXIS_FONTSIZE)
 
    if text:
       ax.text(0.02, 0.98, text, transform=ax.transAxes, weight='bold',
-               fontsize=15, va="top", ha="left",
+               fontsize=MODEL_LABEL_FONTSIZE, va="top", ha="left",
                bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4))
 
    if xticks is not None: ax.set_xticks(xticks)
@@ -80,10 +88,10 @@ def make_model_grid(
       fig.suptitle(title, fontsize=20, fontweight="bold")
 
    if xlabel:
-      fig.text(0.5, 0.02, xlabel, ha='center', fontsize=18, fontweight="bold")
+      fig.text(0.5, 0.02, xlabel, ha='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold")
 
    if ylabel:
-      fig.text(0.02, 0.5, ylabel, ha='center', va='center', fontsize=18, fontweight="bold", rotation=90.)
+      fig.text(0.02, 0.5, ylabel, ha='center', va='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold", rotation=90.)
 
    return fig, np.asarray(axs).ravel()
 
@@ -212,7 +220,7 @@ for run_type in [3, 2, 1]:
          final_figs[expt], final_axs[expt] = make_model_grid(models, dpi=120, title=r"4xCO$_{2}$ T$_{2M}$ vs. Time w/ 2-Box Fit", xlabel=r"Time (years)", ylabel=r"Temperature Anomaly (K)", right=0.95, wspace=0.28)
          final_idx[expt] = 0
          final_xmax[expt] = []
-         final_figs[expt].text(0.975, 0.5, "Equilibrium Ratio", ha='center', va='center', fontsize=18, fontweight="bold", rotation=-90.)
+         final_figs[expt].text(0.975, 0.5, "Equilibrium Ratio", ha='center', va='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold", rotation=-90.)
 
          nettoa_figs[expt], nettoa_axs[expt] = make_model_grid(models, title=r"4xCO$_{2}$ Net TOA vs. Time", xlabel="Time (years)", ylabel=r"Net TOA (10 yr rolling mean, $W\,m^{-2}$)")
          nettoa_idx[expt] = 0
@@ -297,7 +305,7 @@ for run_type in [3, 2, 1]:
                   transform=ax.transAxes,
                   va="top",
                   ha="left",
-                  fontsize=8,
+                  fontsize=EXTRA_TEXT_FONTSIZE,
                   bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4),
                )
 
@@ -472,7 +480,7 @@ for run_type in [3, 2, 1]:
                   transform=ax.transAxes,
                   va="top",
                   ha="left",
-                  fontsize=8,
+                  fontsize=EXTRA_TEXT_FONTSIZE,
                   bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4),
                )
                step2_idx[expt] += 1
@@ -821,7 +829,7 @@ for run_type in [3, 2, 1]:
                   transform=ax.transAxes,
                   va="top",
                   ha="left",
-                  fontsize=8,
+                  fontsize=EXTRA_TEXT_FONTSIZE,
                   bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4),
                )
                ax.axvline(150, color="orange", linestyle=":", linewidth=1, alpha=0.7)

@@ -44,6 +44,13 @@ from scipy.optimize import curve_fit
 PLOT_FONT_FAMILY = "Tahoma"
 mpl.rcParams["font.family"] = PLOT_FONT_FAMILY
 
+# --- shared plot-styling sizes (keep identical across all longrun scripts) ---
+AXIS_LABEL_FONTSIZE  = 22   # figure-level x/y axis + side labels (was 18)
+PANEL_AXIS_FONTSIZE  = 13   # small per-panel axis labels: 3D x/y/z, format_ax (was 9/default)
+MODEL_LABEL_FONTSIZE = 15   # bold top-left model tag
+EXTRA_TEXT_FONTSIZE  = 12   # param boxes under the model tag (was 8)
+# NOTE: plot titles are intentionally left at their current sizes.
+
 # Use at least 3 iterations to match your original script, but allow convergence.
 MIN_ITERATIONS = 3
 MAX_ITERATIONS = 10
@@ -157,13 +164,14 @@ for run_type in [2, 1, 3]:
                   xspacing=True, yspacing=True,
                   legend=True, legend_loc='upper right', grid=True):
 
-         ax.set(title=title, xlabel=xlabel, ylabel=ylabel,
-               xscale=xscale, yscale=yscale,
-               xlim=xlim, ylim=ylim)
+         ax.set(xscale=xscale, yscale=yscale, xlim=xlim, ylim=ylim)
+         if title:  ax.set_title(title, fontweight="bold")
+         if xlabel: ax.set_xlabel(xlabel, fontweight="bold", fontsize=PANEL_AXIS_FONTSIZE)
+         if ylabel: ax.set_ylabel(ylabel, fontweight="bold", fontsize=PANEL_AXIS_FONTSIZE)
 
          if text:
             ax.text(0.02, 0.98, text, transform=ax.transAxes, weight='bold',
-                     fontsize=15, va="top", ha="left",
+                     fontsize=MODEL_LABEL_FONTSIZE, va="top", ha="left",
                      bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4))
 
          if xticks is not None: ax.set_xticks(xticks)
@@ -211,10 +219,10 @@ for run_type in [2, 1, 3]:
             fig.suptitle(title, fontsize=20, fontweight="bold")
 
          if xlabel:
-            fig.text(0.5, 0.02, xlabel, ha='center', fontsize=18, fontweight="bold")
+            fig.text(0.5, 0.02, xlabel, ha='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold")
 
          if ylabel:
-            fig.text(0.02, 0.5, ylabel, ha='center', va='center', fontsize=18, fontweight="bold", rotation=90.)
+            fig.text(0.02, 0.5, ylabel, ha='center', va='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold", rotation=90.)
 
          return fig, np.asarray(axs).ravel()
 
@@ -263,9 +271,9 @@ for run_type in [2, 1, 3]:
          Ng = F - lam * Tg - (eps - 1.0) * Hg
          ax.plot_surface(Tg, Hg, Ng, color="0.5", alpha=0.25, linewidth=0, antialiased=True)
 
-         ax.set_xlabel("T (K)", fontsize=9)
-         ax.set_ylabel(r"H (W m$^{-2}$)", fontsize=9)
-         ax.set_zlabel("N (W m$^{-2}$)", fontsize=9)
+         ax.set_xlabel("T (K)", fontsize=PANEL_AXIS_FONTSIZE, fontweight="bold")
+         ax.set_ylabel(r"H (W m$^{-2}$)", fontsize=PANEL_AXIS_FONTSIZE, fontweight="bold")
+         ax.set_zlabel("N (W m$^{-2}$)", fontsize=PANEL_AXIS_FONTSIZE, fontweight="bold")
          ax.tick_params(labelsize=7)
          ax.set_title(rf"{model}: $\epsilon$={eps:.2f}, $R^2$={r2:.3f}, RMSE={rmse:.3f}",
                       fontsize=10, fontweight="bold")
@@ -675,6 +683,34 @@ for run_type in [2, 1, 3]:
          format_ax(ax, text=model, xscale="linear", yscale="linear")
 
 
+      def plot_radiative_fit_H(ax, bundle, fit_params, H_prev, model):
+         """Net TOA vs. ocean heat uptake H, with the pure-efficacy line
+         N = F-(eps-1)*H and the full regression evaluated at each point's own
+         T, N = F - lambda*T - (eps-1)*H. No H_prev exists before the first
+         EBM-epsilon iteration (Gregory-only), so the panel is left blank then.
+         """
+         if H_prev is None:
+            format_ax(ax, text=model, xscale="linear", yscale="linear", legend=False)
+            return
+
+         T = bundle.T_full
+         N = bundle.N_full
+         F_ref = fit_params["F_ref"]
+         lmbda = fit_params["lambda"]
+         epsilon = fit_params["epsilon"]
+
+         ax.scatter(H_prev, N, s=8, alpha=0.5, label="AOGCM")
+
+         order = np.argsort(H_prev)
+         H_sorted = H_prev[order]
+         ax.plot(H_sorted, F_ref - (epsilon - 1.0) * H_sorted, color="0.4", lw=2, ls=":",
+                 label=rf"$N=F-(\epsilon-1)H$ ($\epsilon$={epsilon:.2f})")
+         ax.plot(H_sorted, F_ref - lmbda * T[order] - (epsilon - 1.0) * H_sorted,
+                 color="green", lw=2, ls="--",
+                 label=r"$N=F-\lambda T-(\epsilon-1)H$")
+         format_ax(ax, text=model, xscale="linear", yscale="linear")
+
+
       def plot_slow_fit(ax, slow, model, iteration):
          ax.scatter(slow["x"], slow["y"], s=8, alpha=0.5, label="AOGCM")
          ax.plot(slow["x"], slow["yfit"], linewidth=2, label=f"τs={slow['tau_s']:.3g}, as={slow['a_s']:.3g}")
@@ -699,7 +735,7 @@ for run_type in [2, 1, 3]:
 
       outdir = Path("./figures_2013b")
       outdir.mkdir(exist_ok=True)
-      ensure_dirs(outdir, current_dir, ["step1", "step2", "validation", "unblinded"])
+      ensure_dirs(outdir, current_dir, ["step1", "step2", "validation", "unblinded", "budget"])
 
       # Cache all model series so every step uses identical baselines and slices.
       series_by_model: Dict[str, SeriesBundle] = {}
@@ -722,6 +758,12 @@ for run_type in [2, 1, 3]:
             models,
             title=rf"4xCO$_2$ Net TOA vs T$_{{2M}}$ (radiative fit, iter {iteration + 1})",
             xlabel="2-meter Air Temperature Anomaly (K)",
+            ylabel=r"Net TOA Radiative Flux Anomaly ($W\,m^{-2}$)",
+         )
+         step1_NH_fig, step1_NH_axs = make_model_grid(
+            models,
+            title=rf"4xCO$_2$ Net TOA vs Ocean Heat Uptake H (radiative fit, iter {iteration + 1})",
+            xlabel=r"Ocean Heat Uptake H ($W\,m^{-2}$)",
             ylabel=r"Net TOA Radiative Flux Anomaly ($W\,m^{-2}$)",
          )
          step2_fig, step2_axs = make_model_grid(
@@ -756,6 +798,7 @@ for run_type in [2, 1, 3]:
 
             update_row(df, model, fit)
             plot_radiative_fit(step1_axs[imodel], bundle, fit, H_prev, model, iteration)
+            plot_radiative_fit_H(step1_NH_axs[imodel], bundle, fit, H_prev, model)
 
          if SAVE_ITERATION_PLOTS:
             suffix = f"iter{iteration + 1:02d}"
@@ -768,7 +811,17 @@ for run_type in [2, 1, 3]:
                   outdir / current_dir / "step1" / "pdf" / f"4xCO2_all_models_T2M_vs_NETTOA_{suffix}.pdf",
                   bbox_inches="tight",
             )
+            step1_NH_fig.savefig(
+                  outdir / current_dir / "step1" / "png" / f"4xCO2_all_models_H_vs_NETTOA_{suffix}.png",
+                  dpi=200,
+                  bbox_inches="tight",
+            )
+            step1_NH_fig.savefig(
+                  outdir / current_dir / "step1" / "pdf" / f"4xCO2_all_models_H_vs_NETTOA_{suffix}.pdf",
+                  bbox_inches="tight",
+            )
          plt.close(step1_fig)
+         plt.close(step1_NH_fig)
 
          if VERBOSE:
             print("Finished Step 1: F_ref, lambda, epsilon, T_eq updated")
@@ -1007,7 +1060,7 @@ for run_type in [2, 1, 3]:
          )
          fig_val.subplots_adjust(left=0.05, right=0.98, bottom=0.075, top=0.95, wspace=0.12, hspace=0.18)
          fig_val.suptitle("Geoffroy vs. replication (w/ 95% CI)", fontsize=20, fontweight="bold")
-         fig_val.text(0.02, 0.5, "A.U.", ha='center', va='center', fontsize=18, fontweight="bold", rotation=90.)
+         fig_val.text(0.02, 0.5, "A.U.", ha='center', va='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold", rotation=90.)
          axs_val = np.asarray(axs_val).ravel()
 
          for ivar, var in enumerate(validation_vars):
@@ -1173,6 +1226,109 @@ for run_type in [2, 1, 3]:
          return np.array([np.nanmean(x[i : i + window]) for i in range(len(x) - window + 1)], dtype=float)
 
 
+      def plot_surface_budget_bars(model, F_ref, lmbda, epsilon, C, T_eq,
+                                   a_f, a_s, tau_f, tau_s, t_final_years,
+                                   png_path, pdf_path, n_save=60):
+         """Stacked-bar decomposition of the surface tendency dT/dt for the final
+         EBM-epsilon (Geoffroy 2013b) fit, one bar per (log-spaced) time step. The
+         upper-layer surface node obeys
+
+             C * dT/dt = F - lambda*T - eps*H ,   H = gamma*(T - T0) ,
+
+         with H the physical deep-ocean heat uptake reconstructed from the analytic
+         two-mode solution. Regrouping the efficacy so the TOA-imbalance term
+         N = F - lambda*T - (eps-1)*H is kept together and dividing by the
+         upper-layer heat capacity C gives three additive contributions [K/yr] that
+         sum EXACTLY to dT/dt:
+
+             +F/C                         constant CO2 forcing (flat in time),
+             -(lambda*T + (eps-1)*H)/C    radiative restoring + efficacy loss,
+             -H/C                         plain deep-ocean heat loss.
+
+         The top panel plots the |magnitude| of each term as stacked bars on a
+         logarithmic y-axis (negative-sign terms are shown by magnitude so they fit
+         the log scale), with the black line the |net dT/dt| and the dashed red line
+         the equilibration ratio T/T_eq on a right-hand axis. The lower panel repeats
+         the same magnitudes as line plots. Time is drawn on a linear axis with each
+         bar spanning the arithmetic midpoints to its neighbours (samples are
+         log-spaced, so early bars are narrow). C carries the year unit
+         (W yr m^-2 K^-1), so F/C etc. are already in K/yr with no extra conversion.
+         """
+         tv = np.logspace(0.0, np.log10(max(t_final_years, 2.0)), n_save)
+         T_s = T_model(tv, T_eq, a_f, a_s, tau_f, tau_s)
+         H_flux = H_physical_from_previous_solution(
+            tv, F_ref=F_ref, lmbda=lmbda, C=C, epsilon=epsilon, T_eq=T_eq,
+            a_f=a_f, a_s=a_s, tau_f=tau_f, tau_s=tau_s,
+         )
+
+         # All three sum to dT/dt [K/yr]; C = W yr m^-2 K^-1 absorbs the time unit.
+         forcing   = np.full_like(T_s, F_ref) / C
+         restoring = (-lmbda * T_s - (epsilon - 1.0) * H_flux) / C   # = (N - F)/C
+         uptake    = (-H_flux) / C
+         net       = forcing + restoring + uptake                    # = dT/dt [K/yr]
+
+         comps = [
+            (r"$F/C$",                                    forcing,   "#9467bd"),
+            (r"$-(\lambda T + (\epsilon-1)H)/C$",         restoring, "#1f77b4"),
+            (r"$-H/C$",                                   uptake,    "#2ca02c"),
+         ]
+         # Linear time axis: place bars at their true year positions with widths
+         # spanning the arithmetic midpoints to the neighbouring log-spaced steps.
+         mid = 0.5 * (tv[:-1] + tv[1:])
+         left = np.concatenate(([max(0.0, tv[0] - (mid[0] - tv[0]))], mid))
+         right = np.concatenate((mid, [tv[-1] + (tv[-1] - mid[-1])]))
+         width = right - left
+
+         fig, (ax, ax2) = plt.subplots(
+            2, 1, figsize=(13, 8), sharex=True,
+            gridspec_kw={"height_ratios": [3, 1.4], "hspace": 0.08},
+         )
+         net_abs = np.abs(net)
+         floor = max(1e-3, 0.5 * float(np.min([np.abs(v).min() for _, v, _ in comps] + [net_abs.min()])))
+         base = np.full_like(net, floor)
+         for label, vals, color in comps:
+            mag = np.abs(vals)
+            ax.bar(left, mag, bottom=base, width=width, align="edge", color=color,
+                   label=label, edgecolor="none")
+            base = base + mag
+         ax.plot(tv, net_abs, color="black", lw=1.4, label=r"$|$net $dT/dt|$")
+         ax.set_yscale("log")
+         ax.set_ylim(floor, base.max() * 1.3)
+         ax.set_ylabel(r"$|dT/dt$ contribution$|$ (K yr$^{-1}$)", fontsize=14, fontweight="bold")
+         ax.set_title(rf"{model}: surface tendency budget "
+                      rf"($\epsilon$={epsilon:.2f}, $\tau_s$={tau_s:.0f} yr, $C$={C:.1f})",
+                      fontsize=13, fontweight="bold")
+
+         # Overlay the surface warming itself as the equilibration ratio T/T_eq on a
+         # right-hand axis, so the correspondence between how far the surface has
+         # equilibrated and its instantaneous tendency dT/dt is visible at a glance.
+         ax_r = ax.twinx()
+         ratio_line, = ax_r.plot(tv, T_s / T_eq, color="red", lw=2.0, ls="--",
+                                 label=r"$T/T_{eq}$")
+         ax_r.set_ylabel(r"Equilibrium Ratio $T/T_{eq}$", fontsize=14,
+                         fontweight="bold", color="red")
+         ax_r.tick_params(axis="y", colors="red")
+         ax_r.spines["right"].set_color("red")
+         ax_r.set_ylim(0.0, 1.05)
+
+         handles, labels = ax.get_legend_handles_labels()
+         handles.append(ratio_line); labels.append(ratio_line.get_label())
+         ax.legend(handles, labels, loc="lower right", prop={"weight": "bold", "size": 10})
+         ax.grid(True, axis="y", which="both", alpha=0.3)
+
+         # Lower panel: magnitude (|.|) of each term vs time, as line plots.
+         for label, vals, color in comps:
+            ax2.plot(tv, np.abs(vals), color=color, lw=1.6, label=label)
+         ax2.set_ylabel(r"$|$contribution$|$ (K yr$^{-1}$)", fontsize=14, fontweight="bold")
+         ax2.grid(True, alpha=0.3)
+
+         ax2.set_xlim(left[0], right[-1])
+         ax2.set_xlabel("Time (years)", fontsize=14, fontweight="bold")
+         fig.savefig(str(png_path), dpi=150, bbox_inches="tight")
+         fig.savefig(str(pdf_path), bbox_inches="tight")
+         plt.close(fig)
+
+
       final_fig, final_axs = make_model_grid(
          models, dpi=120,
          title=r"4xCO$_{2}$ T$_{2M}$ vs. Time w/ EBM-$\epsilon$ Fit",
@@ -1180,7 +1336,7 @@ for run_type in [2, 1, 3]:
          right=0.95, wspace=0.28,
       )
       final_xmax = []
-      final_fig.text(0.975, 0.5, "Equilibrium Ratio", ha='center', va='center', fontsize=18, fontweight="bold", rotation=-90.)
+      final_fig.text(0.975, 0.5, "Equilibrium Ratio", ha='center', va='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold", rotation=-90.)
 
       nettoa_fig, nettoa_axs = make_model_grid(
          models,
@@ -1237,6 +1393,15 @@ for run_type in [2, 1, 3]:
          T_fit = T_model(t, T_eq, a_f, a_s, tau_f, tau_s)
          N_fit = ebm_epsilon_nettoa(t, F_ref, lmbda, epsilon, C, T_eq, a_f, a_s, tau_f, tau_s)
 
+         # ----------------- surface tendency budget (stacked bars) -----------------
+         # F/C, -(lambda*T + (eps-1)*H)/C, -H/C summing to dT/dt for the final fit.
+         plot_surface_budget_bars(
+            model, F_ref, lmbda, epsilon, C, T_eq, a_f, a_s, tau_f, tau_s,
+            float(np.max(t)),
+            outdir / current_dir / "budget" / "png" / f"{model}_surface_budget_bars.png",
+            outdir / current_dir / "budget" / "pdf" / f"{model}_surface_budget_bars.pdf",
+         )
+
          # ----------------- T2M time-series plot -----------------
          ax = final_axs[imodel]
          ax.scatter(t, T_obs, s=4, color="red")
@@ -1271,7 +1436,7 @@ for run_type in [2, 1, 3]:
             transform=ax.transAxes,
             va="top",
             ha="left",
-            fontsize=8,
+            fontsize=EXTRA_TEXT_FONTSIZE,
             bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4),
          )
          ax.axvline(150, color="orange", linestyle=":", linewidth=1, alpha=0.7)
@@ -1364,7 +1529,7 @@ for run_type in [2, 1, 3]:
                transform=ax.transAxes,
                va="top",
                ha="left",
-               fontsize=8,
+               fontsize=EXTRA_TEXT_FONTSIZE,
                bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4),
             )
 

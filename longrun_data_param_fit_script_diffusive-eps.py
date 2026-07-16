@@ -22,6 +22,13 @@ from pde_solver_1lyrEBM_diffusive import Params as PDEParams, solve_model as pde
 PLOT_FONT_FAMILY = "Tahoma"
 mpl.rcParams["font.family"] = PLOT_FONT_FAMILY
 
+# --- shared plot-styling sizes (keep identical across all longrun scripts) ---
+AXIS_LABEL_FONTSIZE  = 22   # figure-level x/y axis + side labels (was 18)
+PANEL_AXIS_FONTSIZE  = 13   # small per-panel axis labels: 3D x/y/z, format_ax (was 9/default)
+MODEL_LABEL_FONTSIZE = 15   # bold top-left model tag
+EXTRA_TEXT_FONTSIZE  = 12   # param boxes under the model tag (was 8)
+# NOTE: plot titles are intentionally left at their current sizes.
+
 # "Purely diffusive" limit of the 1-box + diffusive model: h_ml -> 0 makes
 # the mixed-layer heat capacity vanish, which is singular in the PDE solver
 # (division by c_ml = rho_cp*h_ml), so approximate the limit with a tiny but
@@ -216,13 +223,125 @@ def plot_regression_3d(ax, T, H, N, F, lam, eps, model, cmap="RdBu_r", resid_nor
    Ng = F - lam * Tg - (eps - 1.0) * Hg
    ax.plot_surface(Tg, Hg, Ng, color="0.5", alpha=0.25, linewidth=0, antialiased=True)
 
-   ax.set_xlabel("T (K)", fontsize=9)
-   ax.set_ylabel(r"H (W m$^{-2}$)", fontsize=9)
-   ax.set_zlabel("N (W m$^{-2}$)", fontsize=9)
+   ax.set_xlabel("T (K)", fontsize=PANEL_AXIS_FONTSIZE, fontweight="bold")
+   ax.set_ylabel(r"H (W m$^{-2}$)", fontsize=PANEL_AXIS_FONTSIZE, fontweight="bold")
+   ax.set_zlabel("N (W m$^{-2}$)", fontsize=PANEL_AXIS_FONTSIZE, fontweight="bold")
    ax.tick_params(labelsize=7)
    ax.set_title(rf"{model}: $\epsilon$={eps:.2f}, $R^2$={r2:.3f}, RMSE={rmse:.3f}",
                 fontsize=10, fontweight="bold")
    return sc, resid
+
+
+def plot_surface_budget_bars(model, kappa, h_ml, eps, F_ref, T_eq, t_final_years,
+                             png_path, pdf_path, dz_target=PDE_FIT_DZ_TARGET):
+   """Stacked-bar decomposition of the surface tendency dT_s/dt for the best-fit
+   PDE solution, one bar per saved time step. The surface node the solver
+   integrates is
+
+       c_ml * dT_s/dt = F - lambda*T_s - eps*H ,   H = D*(T_s - theta_1)/dz ,
+
+   Regrouping the efficacy so the TOA-imbalance term N = F - lambda*T_s -
+   (eps-1)*H is kept together and dividing by the mixed-layer heat capacity
+   c_ml = rho_cp*h_ml gives three additive contributions [K/yr] that sum EXACTLY
+   to dT_s/dt:
+
+       +F/c_ml                          constant CO2 forcing (flat in time),
+       -(lambda*T_s + (eps-1)*H)/c_ml   radiative restoring + efficacy loss,
+       -H/c_ml                          plain diffusive heat loss to the thermocline.
+
+   The top panel plots the |magnitude| of each term as stacked bars on a
+   logarithmic y-axis (negative-sign terms are shown by magnitude so they fit the
+   log scale), with the black line the |net dT_s/dt| and the dashed line the
+   equilibration ratio T_s/T_eq on a right-hand axis. The lower panel repeats the
+   same magnitudes as line plots. The surface gradient uses the SAME first-order
+   forward stencil (theta_1 - T_s)/dz as the solver's surface node, so the terms
+   close on the integrated tendency rather than a re-estimate. Time is drawn on a
+   linear axis with each bar spanning the arithmetic midpoints to its neighbours.
+   """
+   z_max, nz = _pde_grid(kappa, t_final_years, dz_target)
+   pde_p = PDEParams(
+      kappa=kappa, h_ml=h_ml, dT_eq=T_eq, F0=F_ref, epsilon=eps,
+      z_max=z_max, Nz=nz, t_final=t_final_years * YEAR,
+   )
+   sol = pde_solve_model(pde_p, t_eval=_log_spaced_t_eval(pde_p.t_final, PDE_FIT_N_SAVE))
+   t_yr = sol["t"] / YEAR
+   theta, dz = sol["theta"], sol["dz"]
+   T_s = theta[0]
+   c_ml, lam, D = pde_p.c_ml, pde_p.lam, pde_p.D      # lam = F_ref/T_eq exactly
+
+   # Per-second tendencies -> K/yr for readability; all three sum to dT_s/dt.
+   forcing   = np.full_like(T_s, F_ref) / c_ml * YEAR
+   H_flux    = D * (T_s - theta[1]) / dz             # W/m^2, >0 when surface warmer
+   restoring = (-lam * T_s - (eps - 1.0) * H_flux) / c_ml * YEAR   # = (N - F)/c_ml
+   uptake    = (-H_flux) / c_ml * YEAR
+   net       = forcing + restoring + uptake          # = dT_s/dt [K/yr]
+
+   comps = [
+      (r"$F/c_{ml}$",                                    forcing,   "#9467bd"),
+      (r"$-(\lambda T_s + (\epsilon-1)H)/c_{ml}$",       restoring, "#1f77b4"),
+      (r"$-H/c_{ml}$",                                   uptake,    "#2ca02c"),
+   ]
+   # Linear time axis: place bars at their true year positions with widths
+   # spanning the arithmetic midpoints to the neighbouring steps so the bar areas
+   # tile the axis (samples are log-spaced, so early bars are narrow).
+   tv = t_yr
+   mid = 0.5 * (tv[:-1] + tv[1:])
+   left = np.concatenate(([max(0.0, tv[0] - (mid[0] - tv[0]))], mid))
+   right = np.concatenate((mid, [tv[-1] + (tv[-1] - mid[-1])]))
+   width = right - left
+
+   # Two stacked panels sharing the time axis (ratio-plot layout): the top panel
+   # stacks the |magnitude| of the three terms as bars on a LOG y-axis (negatives
+   # shown by magnitude so they fit the log scale); the lower panel repeats the
+   # same magnitudes as line plots.
+   fig, (ax, ax2) = plt.subplots(
+      2, 1, figsize=(13, 8), sharex=True,
+      gridspec_kw={"height_ratios": [3, 1.4], "hspace": 0.08},
+   )
+   net_abs = np.abs(net)
+   floor = max(1e-3, 0.5 * float(np.min([np.abs(v).min() for _, v, _ in comps] + [net_abs.min()])))
+   base = np.full_like(net, floor)
+   for label, vals, color in comps:
+      mag = np.abs(vals)
+      ax.bar(left, mag, bottom=base, width=width, align="edge", color=color,
+             label=label, edgecolor="none")
+      base = base + mag
+   ax.plot(tv, net_abs, color="black", lw=1.4, label=r"$|$net $dT_s/dt|$")
+   ax.set_yscale("log")
+   ax.set_ylim(floor, base.max() * 1.3)
+   ax.set_ylabel(r"$|dT_s/dt$ contribution$|$ (K yr$^{-1}$)", fontsize=14, fontweight="bold")
+   ax.set_title(rf"{model}: surface tendency budget "
+                rf"($\kappa$={kappa:.1e}, $h_{{ml}}$={h_ml:.0f} m, $\epsilon$={eps:.2f})",
+                fontsize=13, fontweight="bold")
+
+   # Overlay the surface warming itself as the equilibration ratio T_s/T_eq on a
+   # right-hand axis, so the correspondence between how far the surface has
+   # equilibrated and its instantaneous tendency dT_s/dt is visible at a glance.
+   ax_r = ax.twinx()
+   ratio_line, = ax_r.plot(tv, T_s / T_eq, color="red", lw=2.0, ls="--",
+                           label=r"$T_s/T_{eq}$")
+   ax_r.set_ylabel(r"Equilibrium Ratio $T_s/T_{eq}$", fontsize=14,
+                   fontweight="bold", color="red")
+   ax_r.tick_params(axis="y", colors="red")
+   ax_r.spines["right"].set_color("red")
+   ax_r.set_ylim(0.0, 1.05)
+
+   handles, labels = ax.get_legend_handles_labels()
+   handles.append(ratio_line); labels.append(ratio_line.get_label())
+   ax.legend(handles, labels, loc="lower right", prop={"weight": "bold", "size": 10})
+   ax.grid(True, axis="y", which="both", alpha=0.3)
+
+   # Lower panel: magnitude (|.|) of each term vs time, as line plots.
+   for label, vals, color in comps:
+      ax2.plot(tv, np.abs(vals), color=color, lw=1.6, label=label)
+   ax2.set_ylabel(r"$|$contribution$|$ (K yr$^{-1}$)", fontsize=14, fontweight="bold")
+   ax2.grid(True, alpha=0.3)
+
+   ax2.set_xlim(left[0], right[-1])
+   ax2.set_xlabel("Time (years)", fontsize=14, fontweight="bold")
+   fig.savefig(str(png_path), dpi=150, bbox_inches="tight")
+   fig.savefig(str(pdf_path), bbox_inches="tight")
+   plt.close(fig)
 
 
 # Sensitivity-sweep points are independent (kappa, h_ml) solves, so farm them
@@ -290,13 +409,14 @@ for run_type in RUN_TYPES:
                   xspacing=True, yspacing=True,
                   legend=True, legend_loc='upper right', grid=True):
 
-         ax.set(title=title, xlabel=xlabel, ylabel=ylabel,
-               xscale=xscale, yscale=yscale,
-               xlim=xlim, ylim=ylim)
+         ax.set(xscale=xscale, yscale=yscale, xlim=xlim, ylim=ylim)
+         if title:  ax.set_title(title, fontweight="bold")
+         if xlabel: ax.set_xlabel(xlabel, fontweight="bold", fontsize=PANEL_AXIS_FONTSIZE)
+         if ylabel: ax.set_ylabel(ylabel, fontweight="bold", fontsize=PANEL_AXIS_FONTSIZE)
 
          if text:
             ax.text(0.02, 0.98, text, transform=ax.transAxes, weight='bold',
-                     fontsize=15, va="top", ha="left",
+                     fontsize=MODEL_LABEL_FONTSIZE, va="top", ha="left",
                      bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4))
 
          if xticks is not None: ax.set_xticks(xticks)
@@ -340,10 +460,10 @@ for run_type in RUN_TYPES:
             fig.suptitle(title, fontsize=20, fontweight="bold")
 
          if xlabel:
-            fig.text(0.5, 0.02, xlabel, ha='center', fontsize=18, fontweight="bold")
+            fig.text(0.5, 0.02, xlabel, ha='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold")
 
          if ylabel:
-            fig.text(0.02, 0.5, ylabel, ha='center', va='center', fontsize=18, fontweight="bold", rotation=90.)
+            fig.text(0.02, 0.5, ylabel, ha='center', va='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold", rotation=90.)
 
          return fig, np.asarray(axs).ravel()
 
@@ -393,12 +513,16 @@ for run_type in RUN_TYPES:
       reg3d_idx = 0
       reg3d_scatters = []
 
-      ensure_dirs(outdir, current_dir, ["step1", "validation", "unblinded"])
+      ensure_dirs(outdir, current_dir, ["step1", "validation", "unblinded", "budget"])
 
       # Prepare combined figures for each experiment
       step1_figs = {}
       step1_axs = {}
       step1_idx = {}
+      step1_NH_figs = {}
+      step1_NH_axs = {}
+      step1_NH_idx = {}
+      step1_NH_ax_by_model = {}
       step2_figs = {}
       step2_axs = {}
       step2_idx = {}
@@ -447,10 +571,13 @@ for run_type in RUN_TYPES:
          step1_figs[expt], step1_axs[expt] = make_model_grid(models, title=r"4xCO$_{2}$ Net TOA vs T$_{2M}$", xlabel="2-meter Air Temperature Anomaly (K)", ylabel=r"Net TOA Radiative Flux Anomaly ($W*m^{-2}$)")
          step1_idx[expt] = 0
 
+         step1_NH_figs[expt], step1_NH_axs[expt] = make_model_grid(models, title=r"4xCO$_{2}$ Net TOA vs Ocean Heat Uptake H", xlabel=r"Ocean Heat Uptake H ($W*m^{-2}$)", ylabel=r"Net TOA Radiative Flux Anomaly ($W*m^{-2}$)")
+         step1_NH_idx[expt] = 0
+
          final_figs[expt], final_axs[expt] = make_model_grid(models, dpi=120, title=r"4xCO$_{2}$ T$_{2M}$ vs. Time w/ Diffusive Fit", xlabel=r"Time (years)", ylabel=r"Temperature Anomaly (K)", right=0.95, wspace=0.28)
          final_idx[expt] = 0
          final_xmax[expt] = []
-         final_figs[expt].text(0.975, 0.5, "Equilibrium Ratio", ha='center', va='center', fontsize=18, fontweight="bold", rotation=-90.)
+         final_figs[expt].text(0.975, 0.5, "Equilibrium Ratio", ha='center', va='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold", rotation=-90.)
 
          nettoa_figs[expt], nettoa_axs[expt] = make_model_grid(models, title=r"4xCO$_{2}$ Net TOA vs. Time", xlabel="Time (years)", ylabel=r"Net TOA (10 yr rolling mean, $W\,m^{-2}$)")
          nettoa_idx[expt] = 0
@@ -555,13 +682,17 @@ for run_type in RUN_TYPES:
                   transform=ax.transAxes,
                   va="top",
                   ha="left",
-                  fontsize=8,
+                  fontsize=EXTRA_TEXT_FONTSIZE,
                   bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4),
                )
 
                format_ax(ax, text=f"{model}", xscale="linear", yscale="linear")
                step1_ax_by_model[model] = ax   # STEP 2 overlays the eps*H curve here
                step1_idx[expt] += 1
+
+               ax_nh = step1_NH_axs[expt][step1_NH_idx[expt]]
+               step1_NH_ax_by_model[model] = ax_nh   # STEP 2 draws the N-vs-H fit here
+               step1_NH_idx[expt] += 1
 
                # Define symbolic expressions for uncertainty propagation
                sp_m, sp_b = sp.symbols("m b")
@@ -788,7 +919,7 @@ for run_type in RUN_TYPES:
                   p0 = [min(max(kappa_pde, 1e-7), 1e-3), min(max(h_ml_pde, 1.0), 300.0)]
                   popt, pcov = curve_fit(
                      pde_dT_func, fit_t, fit_T_abs,
-                     p0=p0, bounds=([1e-7, 1], [1e-3, 300.0]), max_nfev=60,
+                     p0=p0, bounds=([1e-7, 1e-3], [1e-3, 300.0]), max_nfev=60,
                   )
                   kappa_pde, h_ml_pde = popt
 
@@ -837,6 +968,23 @@ for run_type in RUN_TYPES:
                         label=rf"w/ $\epsilon H$: $\epsilon$={eps:.2f} (RMSE={rmse_eps:.3f})")
                ax1.legend(loc="upper right", prop={"weight": "bold", "size": 8})
 
+               # ----- STEP 1 (N vs H) panel: fit of N against the ocean heat -----
+               # uptake H, with the pure-efficacy line N = F-(eps-1)*H and the
+               # full regression plane evaluated at each point's own T,
+               # N = F - lambda*T - (eps-1)*H, both plotted vs. H over the
+               # same regression rows the efficacy fit used.
+               order_H = np.argsort(H_reg_final)
+               H_sorted = H_reg_final[order_H]
+               N_eps_line = F_ref - lmbda * T_reg_arr[order_H] - (eps - 1.0) * H_sorted
+               ax_nh = step1_NH_ax_by_model[model]
+               ax_nh.scatter(H_reg_final, N_reg, s=8, alpha=0.5, label="Data")
+               ax_nh.plot(H_sorted, F_ref - (eps - 1.0) * H_sorted, color="0.4", lw=2, ls=":",
+                          label=rf"$N=F-(\epsilon-1) H$ ($\epsilon$={eps:.2f})")
+               ax_nh.plot(H_sorted, N_eps_line, color="green", lw=2, ls="--",
+                          label=r"$N=F-\lambda T-(\epsilon-1) H$")
+               format_ax(ax_nh, text=f"{model}", xscale="linear", yscale="linear",
+                         legend_loc="upper right")
+
                # 3D view of the same multilinear regression: (T, H, N) scatter +
                # the fitted plane N = F - lambda*T - (eps-1)*H, one panel/model.
                sc3d, resid3d = plot_regression_3d(
@@ -847,6 +995,14 @@ for run_type in RUN_TYPES:
                reg3d_idx += 1
 
                pde_T = pde_dT_func(plot_t, kappa_pde, h_ml_pde) / T_eq
+
+               # Stacked-bar decomposition of the surface tendency dT_s/dt into
+               # F/c_ml, -lambda*T/c_ml and -eps*H/c_ml for the best-fit solve.
+               plot_surface_budget_bars(
+                  model, kappa_pde, h_ml_pde, eps, F_ref, T_eq, t_final_years,
+                  outdir / current_dir / "budget" / "png" / f"{expt}_{model}_surface_budget_bars{suffix}.png",
+                  outdir / current_dir / "budget" / "pdf" / f"{expt}_{model}_surface_budget_bars{suffix}.pdf",
+               )
 
                # Ocean heat uptake H(t) [W/m^2] over the plot window, for the
                # efficacy TOA decomposition N = F - lambda*T - (eps-1)*H below
@@ -994,7 +1150,7 @@ for run_type in RUN_TYPES:
                   transform=ax.transAxes,
                   va="top",
                   ha="left",
-                  fontsize=8,
+                  fontsize=EXTRA_TEXT_FONTSIZE,
                   bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4),
                )
                sens_kappa_idx[expt] += 1
@@ -1014,7 +1170,7 @@ for run_type in RUN_TYPES:
                   transform=ax.transAxes,
                   va="top",
                   ha="left",
-                  fontsize=8,
+                  fontsize=EXTRA_TEXT_FONTSIZE,
                   bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4),
                )
                sens_hml_idx[expt] += 1
@@ -1034,7 +1190,7 @@ for run_type in RUN_TYPES:
                   transform=ax.transAxes,
                   va="top",
                   ha="left",
-                  fontsize=8,
+                  fontsize=EXTRA_TEXT_FONTSIZE,
                   bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4),
                )
                sens_dz_idx[expt] += 1
@@ -1082,7 +1238,7 @@ for run_type in RUN_TYPES:
                   transform=ax.transAxes,
                   va="top",
                   ha="left",
-                  fontsize=8,
+                  fontsize=EXTRA_TEXT_FONTSIZE,
                   weight="bold",
                   bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4),
                )
@@ -1185,6 +1341,17 @@ for run_type in RUN_TYPES:
             bbox_inches="tight",
          )
          plt.close(step1_figs[expt])
+
+         step1_NH_figs[expt].savefig(
+            outdir / current_dir / "step1" / "png" / f"{expt}_all_models_H_vs_NETTOA{suffix}.png",
+            dpi=200,
+            bbox_inches="tight",
+         )
+         step1_NH_figs[expt].savefig(
+            outdir / current_dir / "step1" / "pdf" / f"{expt}_all_models_H_vs_NETTOA{suffix}.pdf",
+            bbox_inches="tight",
+         )
+         plt.close(step1_NH_figs[expt])
 
       # Put every 3D regression panel on one shared, symmetric residual color
       # scale, add a single colorbar, and save (into step1/ alongside the
