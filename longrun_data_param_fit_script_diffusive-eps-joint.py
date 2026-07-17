@@ -43,6 +43,12 @@ SENSITIVITY_N_2D = 9                          # points per axis in the joint gri
 SENSITIVITY_KAPPA_BOUNDS = (1e-7, 1e-3)       # matches the curve_fit bounds below
 SENSITIVITY_HML_BOUNDS = (10.0, 2000.0)
 
+# Dedicated h_ml sweep for the ocean-heat-uptake diagnostic: a FIXED, wide,
+# log-spaced range (independent of the per-model best-fit h_ml), over which the
+# efficacy heat-uptake term (eps-1)*H is plotted vs time.
+SENSITIVITY_UPTAKE_HML_RANGE = (1e-3, 1000.0)  # h_ml sweep range [m], log-spaced
+SENSITIVITY_UPTAKE_N = 25                       # number of h_ml curves in that sweep
+
 # Grid-resolution sensitivity sweep: target vertical spacing dz, with kappa
 # and h_ml held at their best-fit values (unlike the kappa/h_ml sweeps above,
 # this isn't a physical-parameter sweep -- it's a numerical-convergence check
@@ -169,6 +175,39 @@ def _pde_grid(kappa, t_final_years, dz_target):
    return z_max, nz
 
 
+# Memoized full PDE solutions, keyed by every input that affects the solve.
+# The best-fit solve gets re-read several times after fitting (final H
+# regression, the reported temperature curve, the budget plot, H_plot);
+# caching collapses those into ONE solve with bit-identical results. Bounded
+# so curve_fit's many trial evaluations can't grow it without limit.
+_PDE_SOL_CACHE = {}
+_PDE_SOL_CACHE_MAX = 8
+
+
+def _cached_pde_solve(kappa, h_ml, eps_, F_ref_, T_eq_, t_final_yrs_,
+                      dz_target_, n_save, rtol=None, atol=None):
+   """One (possibly cached) PDE solve; returns (pde_params, sol). rtol/atol
+   None means the solver's tight defaults (the main-fit setting)."""
+   key = (float(kappa), float(h_ml), float(eps_), float(F_ref_), float(T_eq_),
+          float(t_final_yrs_), float(dz_target_), int(n_save),
+          None if rtol is None else float(rtol),
+          None if atol is None else float(atol))
+   hit = _PDE_SOL_CACHE.get(key)
+   if hit is not None:
+      return hit
+   z_max, nz = _pde_grid(kappa, t_final_yrs_, dz_target_)
+   pde_p = PDEParams(
+      kappa=kappa, h_ml=h_ml, dT_eq=T_eq_, F0=F_ref_, epsilon=eps_,
+      z_max=z_max, Nz=nz, t_final=t_final_yrs_ * YEAR,
+   )
+   kw = {} if rtol is None else {"rtol": rtol, "atol": atol}
+   sol = pde_solve_model(pde_p, t_eval=_log_spaced_t_eval(pde_p.t_final, n_save), **kw)
+   if len(_PDE_SOL_CACHE) >= _PDE_SOL_CACHE_MAX:
+      _PDE_SOL_CACHE.clear()
+   _PDE_SOL_CACHE[key] = (pde_p, sol)
+   return pde_p, sol
+
+
 def pde_H_at(t_years, kappa, h_ml, eps_, F_ref_, T_eq_, t_final_yrs_,
              dz_target_=PDE_FIT_DZ_TARGET):
    """Diffusive ocean heat uptake H(t) = rho_cp*kappa*dtheta/dz|_0 [W/m^2] at
@@ -179,16 +218,12 @@ def pde_H_at(t_years, kappa, h_ml, eps_, F_ref_, T_eq_, t_final_yrs_,
    2nd-order one-sided stencil (-3*theta0 + 4*theta1 - theta2)/(2*dz), and D =
    rho_cp*kappa; H > 0 when the surface is warmer than the water just below.
    """
-   z_max, nz = _pde_grid(kappa, t_final_yrs_, dz_target_)
-   pde_p = PDEParams(
-      kappa=kappa, h_ml=h_ml, dT_eq=T_eq_, F0=F_ref_, epsilon=eps_,
-      z_max=z_max, Nz=nz, t_final=t_final_yrs_ * YEAR,
-   )
    # If the solve fails/blows up, hand back zero uptake so the regression it
    # feeds gets finite (zero-signal) rows rather than NaNs that would poison
    # the lstsq. With F_ref/lambda floored (EPS_*_FLOOR) this should not trigger.
    try:
-      sol = pde_solve_model(pde_p, t_eval=_log_spaced_t_eval(pde_p.t_final, PDE_FIT_N_SAVE))
+      pde_p, sol = _cached_pde_solve(kappa, h_ml, eps_, F_ref_, T_eq_,
+                                     t_final_yrs_, dz_target_, PDE_FIT_N_SAVE)
       theta, dz = sol["theta"], sol["dz"]
       # dtheta/dz|_0 (z positive downward) via 2nd-order one-sided difference.
       dtheta_dz0 = (-3.0 * theta[0] + 4.0 * theta[1] - theta[2]) / (2.0 * dz)
@@ -199,6 +234,34 @@ def pde_H_at(t_years, kappa, h_ml, eps_, F_ref_, T_eq_, t_final_yrs_,
       out = np.interp(t_years, sol["t"] / YEAR, H)
    except Exception:
       out = np.zeros(np.shape(t_years), dtype=float)
+   return np.where(np.isfinite(out), out, 0.0)
+
+
+def _sensitivity_solve_H(kappa, h_ml, F_ref, T_eq, t_final_years, t_eval,
+                         dz_target=15.0, epsilon=1.0):
+   """Diffusive ocean heat uptake H(t) = rho_cp*kappa*dtheta/dz|_0 [W/m^2] for one
+   sensitivity-sweep point. Mirrors _sensitivity_solve_dT (loosened tolerance,
+   module-level so it can be dispatched to _SENS_POOL) but returns the surface
+   heat-uptake flux instead of the temperature, read off the SAME 2nd-order
+   one-sided stencil as pde_H_at. H > 0 when the surface is warmer than the water
+   just below; the caller scales it by (eps-1) for the efficacy uptake term."""
+   z_max = min(4000.0, max(2700.0, 6.0 * np.sqrt(kappa * t_final_years * YEAR)))
+   nz = int(z_max / dz_target + 1)
+   pde_p = PDEParams(
+      kappa=kappa, h_ml=h_ml, dT_eq=T_eq, F0=F_ref, epsilon=epsilon,
+      z_max=z_max, Nz=nz, t_final=t_final_years * YEAR,
+   )
+   try:
+      sol = pde_solve_model(
+         pde_p, t_eval=_log_spaced_t_eval(pde_p.t_final, SENSITIVITY_N_SAVE),
+         rtol=SENSITIVITY_RTOL, atol=SENSITIVITY_ATOL,
+      )
+      theta, dz = sol["theta"], sol["dz"]
+      dtheta_dz0 = (-3.0 * theta[0] + 4.0 * theta[1] - theta[2]) / (2.0 * dz)
+      H = -pde_p.D * dtheta_dz0       # D = rho_cp*kappa; H > 0 = heat leaving surface down
+      out = np.interp(t_eval, sol["t"] / YEAR, H)
+   except Exception:
+      out = np.zeros(np.shape(t_eval), dtype=float)
    return np.where(np.isfinite(out), out, 0.0)
 
 
@@ -246,6 +309,13 @@ def _joint_forward(theta, T_eq, fit_t, H_years, bin_H, t_final_years):
    return T_model, H_reg
 
 
+# Last (theta, residual) pair evaluated in THIS process. least_squares always
+# evaluates fun(x) immediately before jac(x) at the same x, so _joint_jac can
+# reuse that residual instead of re-solving the PDE at the base point (~1 solve
+# saved per Jacobian). Parent-process only; pool workers never see it.
+_JOINT_LAST_R = [None, None]
+
+
 def _joint_residuals(theta, data):
    """Stacked, noise-weighted residual for the joint fit:
       [ (T_model - T_obs)/sigma_T ,  (N_model - N_obs)/sigma_N ]
@@ -261,7 +331,10 @@ def _joint_residuals(theta, data):
    N_model = lam * (T_eq - data["T_reg"]) - (eps - 1.0) * H_reg
    rT = (T_model - data["T_obs"]) / data["sigma_T"]
    rN = (N_model - data["N_obs"]) / data["sigma_N"]
-   return np.concatenate([rT, rN])
+   r = np.concatenate([rT, rN])
+   _JOINT_LAST_R[0] = np.array(theta, dtype=float, copy=True)
+   _JOINT_LAST_R[1] = r
+   return r
 
 
 def _joint_jac(theta, data):
@@ -269,7 +342,12 @@ def _joint_jac(theta, data):
    solves dispatched across _SENS_POOL (each column = one PDE solve, run in
    parallel), so a Jacobian costs ~1 solve of wall-clock time instead of n."""
    theta = np.asarray(theta, dtype=float)
-   r0 = _joint_residuals(theta, data)
+   # Reuse the residual least_squares just computed at this same theta (fun(x)
+   # always precedes jac(x) in TRF), avoiding a redundant PDE solve.
+   if _JOINT_LAST_R[0] is not None and np.array_equal(_JOINT_LAST_R[0], theta):
+      r0 = _JOINT_LAST_R[1]
+   else:
+      r0 = _joint_residuals(theta, data)
    n = theta.size
    step = JOINT_FD_REL_STEP * np.maximum(np.abs(theta), 1.0)
    pert = []
@@ -325,7 +403,9 @@ def run_joint_fit(theta0, data):
    vals = np.array([kappa, h_ml, eps, lam])
 
    # Split the weighted residual back into physical-unit RMSEs.
-   r = _joint_residuals(theta, data)
+   # least_squares already evaluated the residual at sol.x; reuse it instead of
+   # paying one more PDE solve.
+   r = sol.fun
    nT = data["T_obs"].size
    rmse_T = float(np.sqrt(np.mean((r[:nT] * data["sigma_T"]) ** 2)))
    rmse_N = float(np.sqrt(np.mean((r[nT:] * data["sigma_N"]) ** 2)))
@@ -471,12 +551,8 @@ def plot_surface_budget_bars(model, kappa, h_ml, eps, F_ref, T_eq, t_final_years
    close on the integrated tendency rather than a re-estimate. Time is drawn on a
    linear axis with each bar spanning the arithmetic midpoints to its neighbours.
    """
-   z_max, nz = _pde_grid(kappa, t_final_years, dz_target)
-   pde_p = PDEParams(
-      kappa=kappa, h_ml=h_ml, dT_eq=T_eq, F0=F_ref, epsilon=eps,
-      z_max=z_max, Nz=nz, t_final=t_final_years * YEAR,
-   )
-   sol = pde_solve_model(pde_p, t_eval=_log_spaced_t_eval(pde_p.t_final, PDE_FIT_N_SAVE))
+   pde_p, sol = _cached_pde_solve(kappa, h_ml, eps, F_ref, T_eq,
+                                  t_final_years, dz_target, PDE_FIT_N_SAVE)
    t_yr = sol["t"] / YEAR
    theta, dz = sol["theta"], sol["dz"]
    T_s = theta[0]
@@ -681,6 +757,70 @@ for run_type in RUN_TYPES:
          return fig, np.asarray(axs).ravel()
 
 
+      def make_model_grid_with_ratio(
+         models,
+         width_per_ax=6,
+         height_per_ax=6,
+         ratio_height_frac=0.32,
+         dpi=None,
+         title=None,
+         xlabel=None,
+         ylabel=None,
+         ratio_ylabel=None,
+         ncols=4,
+         right=0.98,
+         wspace=0.12,
+         hspace=0.12,
+      ):
+         """Like make_model_grid, but each model panel is a (main, ratio) pair of
+         axes stacked vertically and sharing the x-axis -- the ratio axis is
+         short and sits directly beneath its main axis."""
+         nmodels = len(models)
+         if nmodels % ncols != 0:
+            raise ValueError(f"Expected models divisible by ncols={ncols}, got {nmodels}.")
+         nmodel_rows = nmodels // ncols
+
+         fig = plt.figure(
+            figsize=(width_per_ax * ncols, height_per_ax * nmodel_rows * (1 + ratio_height_frac)),
+            dpi=dpi,
+         )
+
+         height_ratios = [1.0, ratio_height_frac] * nmodel_rows
+         gs = fig.add_gridspec(
+            nmodel_rows * 2, ncols,
+            height_ratios=height_ratios,
+            left=0.05, right=right, bottom=0.075, top=0.95,
+            wspace=wspace, hspace=hspace,
+         )
+
+         main_axs = []
+         ratio_axs = []
+         ratio_ax0 = None                       # all ratio axes share one y-axis
+         for i in range(nmodels):
+            row_block, col = divmod(i, ncols)
+            main_ax = fig.add_subplot(gs[row_block * 2, col])
+            ratio_ax = fig.add_subplot(gs[row_block * 2 + 1, col], sharex=main_ax,
+                                       sharey=ratio_ax0)
+            if ratio_ax0 is None:
+               ratio_ax0 = ratio_ax
+            plt.setp(main_ax.get_xticklabels(), visible=False)
+            if ratio_ylabel and col == 0:
+               ratio_ax.set_ylabel(ratio_ylabel, fontweight="bold", fontsize=EXTRA_TEXT_FONTSIZE)
+            main_axs.append(main_ax)
+            ratio_axs.append(ratio_ax)
+
+         if title:
+            fig.suptitle(title, fontsize=20, fontweight="bold")
+
+         if xlabel:
+            fig.text(0.5, 0.02, xlabel, ha='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold")
+
+         if ylabel:
+            fig.text(0.02, 0.5, ylabel, ha='center', va='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold", rotation=90.)
+
+         return fig, np.asarray(main_axs), np.asarray(ratio_axs)
+
+
       def ensure_dirs(outdir, current_dir, sections):
          for section in sections:
             (outdir / current_dir / section / "png").mkdir(parents=True, exist_ok=True)
@@ -715,6 +855,7 @@ for run_type in RUN_TYPES:
       # once eps/kappa/h_ml/H are known. The STEP 1 figure's save is deferred
       # until after STEP 2 for the same reason.
       step1_ax_by_model = {}
+      step1_ratio_ax_by_model = {}
 
       # 3D (T, H, N) regression figure: one panel per model, populated in STEP 2
       # (which computes H and the fitted eps), saved after STEP 2. reg3d_scatters
@@ -731,36 +872,35 @@ for run_type in RUN_TYPES:
       # Prepare combined figures for each experiment
       step1_figs = {}
       step1_axs = {}
+      step1_ratio_axs = {}
       step1_idx = {}
       step1_NH_figs = {}
       step1_NH_axs = {}
       step1_NH_idx = {}
       step1_NH_ax_by_model = {}
-      step2_figs = {}
-      step2_axs = {}
-      step2_idx = {}
+      step1_HT_figs = {}
+      step1_HT_axs = {}
+      step1_HT_idx = {}
+      step1_HT_ax_by_model = {}
       final_figs = {}
       final_axs = {}
       final_idx = {}
       final_xmax = {}
-      tau_s_figs = {}
-      tau_s_axs = {}
-      tau_s_idx = {}
       nettoa_figs = {}
       nettoa_axs = {}
       nettoa_idx = {}
       ohc_ts_figs = {}
       ohc_ts_axs = {}
       ohc_ts_idx = {}
-      assmpt_figs = {}
-      assmpt_axs = {}
-      assmpt_idx = {}
       sens_kappa_figs = {}
       sens_kappa_axs = {}
       sens_kappa_idx = {}
       sens_hml_figs = {}
       sens_hml_axs = {}
       sens_hml_idx = {}
+      sens_hml_uptake_figs = {}
+      sens_hml_uptake_axs = {}
+      sens_hml_uptake_idx = {}
       sens_dz_figs = {}
       sens_dz_axs = {}
       sens_dz_idx = {}
@@ -775,17 +915,26 @@ for run_type in RUN_TYPES:
       # (populated per subplot below, normalized/colorbarred after all models).
       sens_kappa_lines = {}   # list of (Line2D, kappa_value) per expt
       sens_hml_lines = {}     # list of (Line2D, h_ml_value) per expt
+      sens_hml_uptake_lines = {}  # list of (Line2D, h_ml_value) per expt (uptake sweep)
       sens_dz_lines = {}      # list of (Line2D, dz_value) per expt
       sens_t63_meshes = {}    # list of (QuadMesh, grid) per expt
       sens_rmse_meshes = {}   # list of (QuadMesh, grid) per expt
 
       # Create the shared per-experiment figures (one 8-panel grid per model set)
       for expt in ['4xCO2']:
-         step1_figs[expt], step1_axs[expt] = make_model_grid(models, title=r"4xCO$_{2}$ Net TOA vs T$_{2M}$", xlabel="2-meter Air Temperature Anomaly (K)", ylabel=r"Net TOA Radiative Flux Anomaly ($W*m^{-2}$)")
+         step1_figs[expt], step1_axs[expt], step1_ratio_axs[expt] = make_model_grid_with_ratio(
+            models, title=r"4xCO$_{2}$ Net TOA vs T$_{2M}$",
+            xlabel="2-meter Air Temperature Anomaly (K)",
+            ylabel=r"Net TOA Radiative Flux Anomaly ($W*m^{-2}$)",
+            ratio_ylabel=r"$\frac{F-\lambda T-(\epsilon-1)H}{F-\lambda T}$",
+         )
          step1_idx[expt] = 0
 
          step1_NH_figs[expt], step1_NH_axs[expt] = make_model_grid(models, title=r"4xCO$_{2}$ Net TOA vs Ocean Heat Uptake H", xlabel=r"Ocean Heat Uptake H ($W*m^{-2}$)", ylabel=r"Net TOA Radiative Flux Anomaly ($W*m^{-2}$)")
          step1_NH_idx[expt] = 0
+
+         step1_HT_figs[expt], step1_HT_axs[expt] = make_model_grid(models, title=r"4xCO$_{2}$ Ocean Heat Uptake H vs T$_{2M}$", xlabel="2-meter Air Temperature Anomaly (K)", ylabel=r"Ocean Heat Uptake H ($W*m^{-2}$)")
+         step1_HT_idx[expt] = 0
 
          final_figs[expt], final_axs[expt] = make_model_grid(models, dpi=120, title=r"4xCO$_{2}$ T$_{2M}$ vs. Time w/ Diffusive Fit", xlabel=r"Time (years)", ylabel=r"Temperature Anomaly (K)", right=0.95, wspace=0.28)
          final_idx[expt] = 0
@@ -804,6 +953,9 @@ for run_type in RUN_TYPES:
          sens_hml_figs[expt], sens_hml_axs[expt] = make_model_grid(models, title=r"Sensitivity to h$_{ml}$ ($\kappa$ held at best fit)", xlabel="Time (years)", ylabel="Equilibrium Ratio ($T/T_{eq}$)")
          sens_hml_idx[expt] = 0
 
+         sens_hml_uptake_figs[expt], sens_hml_uptake_axs[expt] = make_model_grid(models, title=r"Ocean Heat Uptake Sensitivity to h$_{ml}$ ($\kappa$ held at best fit)", xlabel="Time (years)", ylabel=r"$H$ (W m$^{-2}$)")
+         sens_hml_uptake_idx[expt] = 0
+
          sens_dz_figs[expt], sens_dz_axs[expt] = make_model_grid(models, title=r"Sensitivity to Grid Spacing dz ($\kappa$, h$_{ml}$ held at best fit)", xlabel="Time (years)", ylabel="Equilibrium Ratio ($T/T_{eq}$)")
          sens_dz_idx[expt] = 0
 
@@ -815,6 +967,7 @@ for run_type in RUN_TYPES:
 
          sens_kappa_lines[expt] = []
          sens_hml_lines[expt] = []
+         sens_hml_uptake_lines[expt] = []
          sens_dz_lines[expt] = []
          sens_t63_meshes[expt] = []
          sens_rmse_meshes[expt] = []
@@ -880,7 +1033,7 @@ for run_type in RUN_TYPES:
                # Draw the Step 1 scatter + fit on the shared figure
                ax = step1_axs[expt][step1_idx[expt]]
                ax.scatter(t2m, nettoa, s=8, alpha=0.5, label="Data")
-               ax.plot(xfit, yfit, linewidth=2, label=f"Fit: F_ref={b:.3f}, -lambda={m:.3f}")
+               ax.plot(xfit, yfit, linewidth=2, label=f"Step 1 Fit: F_ref={b:.3f}, -lambda={m:.3f}")
 
                # Compute and annotate R^2 and RMSE for the fit on this panel
                y_pred = m * t2m + b
@@ -901,11 +1054,15 @@ for run_type in RUN_TYPES:
 
                format_ax(ax, text=f"{model}", xscale="linear", yscale="linear")
                step1_ax_by_model[model] = ax   # STEP 2 overlays the eps*H curve here
+               step1_ratio_ax_by_model[model] = step1_ratio_axs[expt][step1_idx[expt]]
                step1_idx[expt] += 1
 
                ax_nh = step1_NH_axs[expt][step1_NH_idx[expt]]
                step1_NH_ax_by_model[model] = ax_nh   # STEP 2 draws the N-vs-H fit here
                step1_NH_idx[expt] += 1
+
+               step1_HT_ax_by_model[model] = step1_HT_axs[expt][step1_HT_idx[expt]]
+               step1_HT_idx[expt] += 1
 
                # Define symbolic expressions for uncertainty propagation
                sp_m, sp_b = sp.symbols("m b")
@@ -1047,19 +1204,20 @@ for run_type in RUN_TYPES:
                # parameters.
                t_final_years = max(fit_t.max(), plot_t.max())
 
-               def make_pde_dT(F_ref_, T_eq_, t_final_yrs_, eps_=1.0, dz_target_=15.0):
+               def make_pde_dT(F_ref_, T_eq_, t_final_yrs_, eps_=1.0, dz_target_=15.0,
+                               rtol_=None, atol_=None):
+                  # rtol_/atol_ None = the solver's tight defaults (final reported
+                  # curves); the eps=1 SEED fit passes the loosened SENSITIVITY_*
+                  # tolerances since it only sets theta0/sigma_T for the joint fit.
                   def pde_dT(t_years, kappa, h_ml):
-                     z_max, nz = _pde_grid(kappa, t_final_yrs_, dz_target_)
-                     pde_p = PDEParams(
-                        kappa=kappa, h_ml=h_ml, dT_eq=T_eq_, F0=F_ref_, epsilon=eps_,
-                        z_max=z_max, Nz=nz, t_final=t_final_yrs_ * YEAR,
-                     )
                      # Guard the curve_fit residual: if the solver fails or
                      # returns a non-finite series at some probed (kappa, h_ml),
                      # hand back a large finite sentinel so least_squares steers
                      # away instead of crashing on a NaN Jacobian.
                      try:
-                        sol = pde_solve_model(pde_p, t_eval=_log_spaced_t_eval(pde_p.t_final, PDE_FIT_N_SAVE))
+                        _, sol = _cached_pde_solve(kappa, h_ml, eps_, F_ref_, T_eq_,
+                                                   t_final_yrs_, dz_target_,
+                                                   PDE_FIT_N_SAVE, rtol=rtol_, atol=atol_)
                         dT = np.interp(t_years, sol["t"] / YEAR, sol["dT"])
                      except Exception:
                         dT = np.full(np.shape(t_years), 1e6, dtype=float)
@@ -1091,7 +1249,8 @@ for run_type in RUN_TYPES:
                # Seed kappa/h_ml from a cheap eps=1 fit, and set the residual
                # noise scales sigma_T (temperature-fit RMSE) and sigma_N (Gregory
                # RMSE) that weight the two data streams in the joint objective.
-               pde_dT_func = make_pde_dT(F_ref, T_eq, t_final_years, 1.0, dz_target_=PDE_FIT_DZ_TARGET)
+               pde_dT_func = make_pde_dT(F_ref, T_eq, t_final_years, 1.0, dz_target_=PDE_FIT_DZ_TARGET,
+                                         rtol_=SENSITIVITY_RTOL, atol_=SENSITIVITY_ATOL)
                popt_seed, _ = curve_fit(
                   pde_dT_func, fit_t, fit_T_abs,
                   p0=[1.0e-4, 100.0], bounds=([1e-7, 1e-3], [1e-3, 300.0]), max_nfev=60,
@@ -1113,7 +1272,7 @@ for run_type in RUN_TYPES:
                }
                theta0 = np.array([
                   np.log10(min(max(kappa0, 1e-7), 1e-3)),
-                  min(max(h_ml0, 1.0), 300.0), 1.0,
+                  min(max(h_ml0, 1e-3), 300.0), 1.0,
                   max(lmbda, 0.05),
                ])
                joint = run_joint_fit(theta0, joint_data)
@@ -1168,13 +1327,39 @@ for run_type in RUN_TYPES:
                   H_reg_final = np.array([H_reg_final[i:i + 50].mean()
                                           for i in range(50, H_reg_final.shape[0], 50)])
                T_reg_arr = np.asarray(T_reg, dtype=float)
-               N_eps_reg = F_ref - lmbda * T_reg_arr - (eps - 1.0) * H_reg_final
+               N_joint_line = F_ref - lmbda * T_reg_arr
+               N_eps_reg = N_joint_line - (eps - 1.0) * H_reg_final
                rmse_eps = float(np.sqrt(np.mean((np.asarray(N_reg, dtype=float) - N_eps_reg) ** 2)))
                ax1 = step1_ax_by_model[model]
                order = np.argsort(T_reg_arr)
+
+               # Straight-line fit using the JOINT-optimized F_ref/lambda (as
+               # opposed to the STEP 1 line already on this axis, which used the
+               # standalone Gregory regression's F_ref/lambda).
+               ax1.plot(T_reg_arr[order], N_joint_line[order], color="tab:orange", lw=2, ls="-.",
+                        label=f"Joint Fit: F_ref={F_ref:.3f}, -lambda={-lmbda:.3f}")
                ax1.plot(T_reg_arr[order], N_eps_reg[order], color="green", lw=2, ls="--",
                         label=rf"w/ $(\epsilon-1)H$: $\epsilon$={eps:.2f} (RMSE={rmse_eps:.3f})")
                ax1.legend(loc="upper right", prop={"weight": "bold", "size": 8})
+
+               # ----- Ratio panel beneath the STEP 1 panel -----
+               # Ratio of the efficacy-corrected joint prediction to the plain
+               # joint straight-line prediction, both using the SAME joint
+               # F_ref/lambda -- isolates how much the -(eps-1)*H term alone
+               # is doing relative to the joint Gregory line.
+               ratio_ax = step1_ratio_ax_by_model[model]
+               # Guard the ratio where the plain Gregory line N=F-lambda*T passes
+               # through zero (T ~ T_eq): 0/0 there is undefined and, with the
+               # ratio y-axis now SHARED across all model panels, one divergent
+               # point would blow up the common scale. Mask that thin band to nan.
+               denom = np.where(np.abs(N_joint_line) > 0.02 * abs(F_ref),
+                                N_joint_line, np.nan)
+               ratio_vals = N_eps_reg / denom
+               ratio_ax.axhline(1.0, color="0.5", lw=1.0, ls=":")
+               ratio_ax.plot(T_reg_arr[order], ratio_vals[order], color="green", lw=1.5,
+                             marker="o", ms=3)
+               ratio_ax.tick_params(labelsize=12, width=2, length=6, direction="in")
+               ratio_ax.grid(alpha=0.3)
 
                # ----- STEP 1 (N vs H) panel: fit of N against the ocean heat -----
                # uptake H, with the pure-efficacy term N = -(eps-1)*H and the
@@ -1191,6 +1376,22 @@ for run_type in RUN_TYPES:
                ax_nh.plot(H_reg_final, N_eps_line, color="green", lw=2, ls="--",
                           label=r"$N=F-\lambda T-(\epsilon-1) H$")
                format_ax(ax_nh, text=f"{model}", xscale="linear", yscale="linear",
+                         legend_loc="upper right")
+
+               # ----- STEP 1 (H vs T) panel: ocean heat uptake H vs surface -----
+               # temperature. Data = the fitted PDE's H at the regression rows;
+               # curve = H inverted from the efficacy radiative relation using the
+               # AOGCM N, H = (F - N - lambda*T)/(eps-1). If the fit is good the
+               # curve tracks the H data.
+               ax_ht = step1_HT_ax_by_model[model]
+               N_reg_arr = np.asarray(N_reg, dtype=float)
+               order_T = np.argsort(T_reg_arr)
+               ax_ht.scatter(T_reg_arr, H_reg_final, s=8, alpha=0.5, label="H (PDE fit)")
+               if abs(eps - 1.0) > 1e-6:
+                  H_inv = (F_ref - N_reg_arr - lmbda * T_reg_arr) / (eps - 1.0)
+                  ax_ht.plot(T_reg_arr[order_T], H_inv[order_T], color="green",
+                             label=r"$H=(F-N-\lambda T)/(\epsilon-1)$ (AOGCM)")
+               format_ax(ax_ht, text=f"{model}", xscale="linear", yscale="linear",
                          legend_loc="upper right")
 
                # 3D view of the same multilinear regression: (T, H, N) scatter +
@@ -1259,10 +1460,18 @@ for run_type in RUN_TYPES:
                # evaluated over plot_t (not extended to equilibrium), same as
                # the AOGCM data it's compared against.
                if results == 'unblinded':
-                  normalized_OHC = (5.1e14 * 31536000 * np.cumsum(nettoa)) / (1.37e21 * 2700.0)
+                  # Reference heat content = rho_cp * z_max * T_eq over the whole
+                  # ocean area, where z_max is the fit's ACTUAL grid depth (the
+                  # column that warms to T_eq at equilibrium). Computed from this
+                  # model's fitted kappa_pde with the same _pde_grid sizing the PDE
+                  # solve used, so normalized_OHC_pred/T_eq -> 1 at equilibrium
+                  # instead of z_max/2700.
+                  z_max, _ = _pde_grid(kappa_pde, t_final_years, PDE_FIT_DZ_TARGET)
+                  ohc_ref = 5.1e14 * 4.186e6 * z_max          # OHC_eq / T_eq  [J/K]
+                  normalized_OHC = (5.1e14 * 31536000 * np.cumsum(nettoa)) / (1.37e21 * 3850)
 
                   N_pde = F_ref - lmbda * (T_eq * pde_T) - (eps - 1.0) * H_plot
-                  normalized_OHC_pred = (5.1e14 * 31536000 * np.cumsum(N_pde)) / (1.37e21 * 2700.0)
+                  normalized_OHC_pred = (5.1e14 * 31536000 * np.cumsum(N_pde)) / ohc_ref
 
                   cmap = plt.cm.turbo
                   norm = mpl.colors.Normalize(vmin=0, vmax=6000)
@@ -1300,6 +1509,19 @@ for run_type in RUN_TYPES:
                      [(kappa_pde, h, F_ref, T_eq, t_final_years, plot_t, PDE_FIT_DZ_TARGET, eps) for h in h_ml_grid_1d],
                   )
                ]
+
+               # Ocean-heat-uptake sensitivity to h_ml: sweep h_ml over a FIXED
+               # log-spaced range [1e-3, 1000] m (kappa/eps held at best fit) and
+               # record the diffusive heat-uptake flux H(t) [W/m^2], with
+               # H = rho_cp*kappa*dtheta/dz|_0 the diffusive surface flux.
+               h_ml_uptake_grid = np.geomspace(
+                  SENSITIVITY_UPTAKE_HML_RANGE[0], SENSITIVITY_UPTAKE_HML_RANGE[1],
+                  SENSITIVITY_UPTAKE_N,
+               )
+               h_ml_uptake_curves = _SENS_POOL.starmap(
+                  _sensitivity_solve_H,
+                  [(kappa_pde, h, F_ref, T_eq, t_final_years, plot_t, PDE_FIT_DZ_TARGET, eps) for h in h_ml_uptake_grid],
+               )
 
                # Grid-resolution sweep: kappa/h_ml held at their best fit, only
                # the target vertical spacing dz varies (see SENSITIVITY_DZ_RANGE).
@@ -1382,6 +1604,29 @@ for run_type in RUN_TYPES:
                   bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4),
                )
                sens_hml_idx[expt] += 1
+
+               # --- Panel 2b: ocean-heat-uptake sensitivity to h_ml ---
+               # H(t) as h_ml is swept log-uniformly over [1e-3, 1000] m;
+               # curves are recolored by h_ml (LogNorm) after all models are drawn.
+               # The best-fit curve reuses H_plot (no extra solve).
+               ax = sens_hml_uptake_axs[expt][sens_hml_uptake_idx[expt]]
+               for h_val, curve in zip(h_ml_uptake_grid, h_ml_uptake_curves):
+                  (line,) = ax.plot(plot_t, curve, lw=1.2, alpha=0.85)
+                  sens_hml_uptake_lines[expt].append((line, h_val))
+               ax.axhline(0.0, color="0.6", lw=0.8, ls=":")
+               ax.plot(plot_t, H_plot, color="black", lw=2, label="Best Fit", zorder=5)
+               format_ax(ax, text=f"{model}", xscale="linear", yscale="linear", legend_loc="upper right")
+               ax.text(
+                  0.02,
+                  0.92,
+                  rf"$\kappa$ = {kappa_pde:.2e} m$^2$/s, $\epsilon$ = {eps:.2f}, h$_{{ml}}^*$ = {h_ml_pde:.0f} m",
+                  transform=ax.transAxes,
+                  va="top",
+                  ha="left",
+                  fontsize=EXTRA_TEXT_FONTSIZE,
+                  bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4),
+               )
+               sens_hml_uptake_idx[expt] += 1
 
                # --- Panel 3: dz spaghetti (sequential purple ramp = dz) ---
                ax = sens_dz_axs[expt][sens_dz_idx[expt]]
@@ -1561,6 +1806,17 @@ for run_type in RUN_TYPES:
          )
          plt.close(step1_NH_figs[expt])
 
+         step1_HT_figs[expt].savefig(
+            outdir / current_dir / "step1" / "png" / f"{expt}_all_models_H_vs_T2M{suffix}.png",
+            dpi=200,
+            bbox_inches="tight",
+         )
+         step1_HT_figs[expt].savefig(
+            outdir / current_dir / "step1" / "pdf" / f"{expt}_all_models_H_vs_T2M{suffix}.pdf",
+            bbox_inches="tight",
+         )
+         plt.close(step1_HT_figs[expt])
+
       # Put every 3D regression panel on one shared, symmetric residual color
       # scale, add a single colorbar, and save (into step1/ alongside the
       # Net TOA vs T2M figure it complements).
@@ -1652,6 +1908,16 @@ for run_type in RUN_TYPES:
          cbar = sens_hml_figs[expt].colorbar(sm, ax=list(sens_hml_axs[expt]), fraction=0.03, pad=0.02)
          cbar.set_label(r"h$_{ml}$ (m)", fontsize=15, fontweight="bold")
 
+         # Uptake sweep: h_ml is log-spaced over 6 decades, so use a LogNorm.
+         hml_up_vals = np.array([v for _, v in sens_hml_uptake_lines[expt]])
+         hml_up_norm = mpl.colors.LogNorm(vmin=hml_up_vals.min(), vmax=hml_up_vals.max())
+         for line, v in sens_hml_uptake_lines[expt]:
+            line.set_color(plt.cm.Oranges(0.25 + 0.65 * hml_up_norm(v)))
+         sm = mpl.cm.ScalarMappable(norm=hml_up_norm, cmap=plt.cm.Oranges)
+         sm.set_array([])
+         cbar = sens_hml_uptake_figs[expt].colorbar(sm, ax=list(sens_hml_uptake_axs[expt]), fraction=0.03, pad=0.02)
+         cbar.set_label(r"h$_{ml}$ (m)", fontsize=15, fontweight="bold")
+
          dz_vals = np.array([v for _, v in sens_dz_lines[expt]])
          dz_norm = mpl.colors.LogNorm(vmin=dz_vals.min(), vmax=dz_vals.max())
          for line, v in sens_dz_lines[expt]:
@@ -1687,6 +1953,7 @@ for run_type in RUN_TYPES:
          spaghetti_figs_to_save = [
             (sens_kappa_figs[expt], sens_kappa_axs[expt], "sensitivity_spaghetti_kappa"),
             (sens_hml_figs[expt], sens_hml_axs[expt], "sensitivity_spaghetti_h_ml"),
+            (sens_hml_uptake_figs[expt], sens_hml_uptake_axs[expt], "sensitivity_uptake_h_ml"),
             (sens_dz_figs[expt], sens_dz_axs[expt], "sensitivity_spaghetti_dz"),
          ]
          for fig, axs, name in spaghetti_figs_to_save:

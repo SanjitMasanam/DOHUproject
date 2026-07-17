@@ -77,7 +77,7 @@ EARLY_YEAR_START = 1
 EARLY_YEAR_END = 10
 
 for run_type in [2, 1, 3]:
-   for results in ["unblinded", "validation"]:
+   for results in ["unblinded"]:
       dir_list = [
          "geoffroy_replicate_results",
          "50-yr_avg_forcing_results",
@@ -225,6 +225,71 @@ for run_type in [2, 1, 3]:
             fig.text(0.02, 0.5, ylabel, ha='center', va='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold", rotation=90.)
 
          return fig, np.asarray(axs).ravel()
+
+
+      def make_model_grid_with_ratio(
+         models,
+         width_per_ax=6,
+         height_per_ax=6,
+         ratio_height_frac=0.32,
+         dpi=None,
+         title=None,
+         xlabel=None,
+         ylabel=None,
+         ratio_ylabel=None,
+         ncols=4,
+         right=0.98,
+         wspace=0.12,
+         hspace=0.12,
+      ):
+         """Like make_model_grid, but each model panel is a (main, ratio) pair of
+         axes stacked vertically and sharing the x-axis -- the ratio axis is short
+         and sits directly beneath its main axis. All ratio axes share ONE y-axis
+         so the panels are directly comparable."""
+         nmodels = len(models)
+         if nmodels % ncols != 0:
+            raise ValueError(f"Expected models divisible by ncols={ncols}, got {nmodels}.")
+         nmodel_rows = nmodels // ncols
+
+         fig = plt.figure(
+            figsize=(width_per_ax * ncols, height_per_ax * nmodel_rows * (1 + ratio_height_frac)),
+            dpi=dpi,
+         )
+
+         height_ratios = [1.0, ratio_height_frac] * nmodel_rows
+         gs = fig.add_gridspec(
+            nmodel_rows * 2, ncols,
+            height_ratios=height_ratios,
+            left=0.05, right=right, bottom=0.075, top=0.95,
+            wspace=wspace, hspace=hspace,
+         )
+
+         main_axs = []
+         ratio_axs = []
+         ratio_ax0 = None                       # all ratio axes share one y-axis
+         for i in range(nmodels):
+            row_block, col = divmod(i, ncols)
+            main_ax = fig.add_subplot(gs[row_block * 2, col])
+            ratio_ax = fig.add_subplot(gs[row_block * 2 + 1, col], sharex=main_ax,
+                                       sharey=ratio_ax0)
+            if ratio_ax0 is None:
+               ratio_ax0 = ratio_ax
+            plt.setp(main_ax.get_xticklabels(), visible=False)
+            if ratio_ylabel and col == 0:
+               ratio_ax.set_ylabel(ratio_ylabel, fontweight="bold", fontsize=EXTRA_TEXT_FONTSIZE)
+            main_axs.append(main_ax)
+            ratio_axs.append(ratio_ax)
+
+         if title:
+            fig.suptitle(title, fontsize=20, fontweight="bold")
+
+         if xlabel:
+            fig.text(0.5, 0.02, xlabel, ha='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold")
+
+         if ylabel:
+            fig.text(0.02, 0.5, ylabel, ha='center', va='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold", rotation=90.)
+
+         return fig, np.asarray(main_axs), np.asarray(ratio_axs)
 
 
       def ensure_dirs(outdir, current_dir, sections):
@@ -660,7 +725,7 @@ for run_type in [2, 1, 3]:
                   df.loc[df["model"] == model, key] = val
 
 
-      def plot_radiative_fit(ax, bundle, fit_params, H_prev, model, iteration):
+      def plot_radiative_fit(ax, ratio_ax, bundle, fit_params, H_prev, model, iteration):
          T = bundle.T_full
          N = bundle.N_full
          t = bundle.t_full
@@ -671,16 +736,51 @@ for run_type in [2, 1, 3]:
          ax.scatter(T, N, s=8, alpha=0.5, label="AOGCM")
 
          order = np.argsort(T)
+         Ts = T[order]
+
+         # Step 1 fit, BEFORE the epsilon iteration: a plain Gregory regression
+         # N = F - lambda*T on the raw (T, N) data (epsilon = 1, no H term). It is
+         # recomputed from the data, so it is fixed across iterations and shows how
+         # far the efficacy fit has moved the feedback line.
+         greg0 = fit_gregory_initial(T, N)
+         F0, lam0 = greg0["F_ref"], greg0["lambda"]
+         ax.plot(Ts, F0 - lam0 * Ts, color="0.5", lw=2, ls=":",
+                 label=f"Step 1 (pre-ε): F={F0:.3g}, λ={lam0:.3g}")
+
+         # Plain linear line N = F - lambda*T using the CURRENT (iteratively fit)
+         # F and lambda -- i.e. the efficacy fit's radiative feedback WITHOUT its
+         # -(eps-1)*H uptake term (this is also the ratio panel's denominator).
+         N_greg = F_ref - lmbda * T
+         ax.plot(Ts, N_greg[order], color="tab:orange", lw=2, ls="-.",
+                 label=f"N=F-λT (iter): F={F_ref:.3g}, λ={lmbda:.3g}")
+
+         # Full step-1 prediction for this iteration: Gregory on iter 0, else the
+         # EBM-epsilon line N = F - lambda*T - (eps-1)*H.
          if H_prev is None:
-            yfit = F_ref - lmbda * T[order]
+            yfit = N_greg[order]
             label = f"Gregory: F={F_ref:.3g}, λ={lmbda:.3g}"
          else:
-            yfit_all = F_ref - lmbda * T - (epsilon - 1.0) * H_prev
-            yfit = yfit_all[order]
+            yfit = (N_greg - (epsilon - 1.0) * H_prev)[order]
             label = f"EBM-ε: F={F_ref:.3g}, λ={lmbda:.3g}, ε={epsilon:.3g}"
 
-         ax.plot(T[order], yfit, linewidth=2, label=label)
+         ax.plot(Ts, yfit, color="green", lw=2, ls="--", label=label)
          format_ax(ax, text=model, xscale="linear", yscale="linear")
+
+         # ----- Ratio panel beneath the main panel -----
+         # Ratio of the efficacy-corrected prediction to the plain Gregory line,
+         # (F-lambda*T-(eps-1)*H)/(F-lambda*T) -- isolates how much the -(eps-1)*H
+         # term is doing. No H before the first EBM-eps iteration (Gregory only),
+         # so the ratio is identically 1 and the panel is left blank then. The
+         # denominator is masked where the Gregory line crosses zero (T ~ T_eq),
+         # since 0/0 is undefined and would blow up the shared ratio y-axis.
+         ratio_ax.axhline(1.0, color="0.5", lw=1.0, ls=":")
+         if H_prev is not None:
+            denom = np.where(np.abs(N_greg) > 0.02 * abs(F_ref), N_greg, np.nan)
+            ratio_vals = (N_greg - (epsilon - 1.0) * H_prev) / denom
+            ratio_ax.plot(T[order], ratio_vals[order], color="green", lw=1.5,
+                          marker="o", ms=3)
+         ratio_ax.tick_params(labelsize=12, width=2, length=6, direction="in")
+         ratio_ax.grid(alpha=0.3)
 
 
       def plot_radiative_fit_H(ax, bundle, fit_params, H_prev, model):
@@ -709,6 +809,33 @@ for run_type in [2, 1, 3]:
          ax.plot(H_prev, F_ref - lmbda * T - (epsilon - 1.0) * H_prev,
                  color="green", lw=2, ls="--",
                  label=r"$N=F-\lambda T-(\epsilon-1)H$")
+         format_ax(ax, text=model, xscale="linear", yscale="linear")
+
+
+      def plot_uptake_vs_T(ax, bundle, fit_params, H_prev, model):
+         """Ocean heat uptake H vs surface temperature T: the data (H_prev, the
+         physical heat uptake from the previous EBM-epsilon solution) and the curve
+         H = (F - N - lambda*T)/(eps-1), obtained by inverting the efficacy
+         radiative relation N = F - lambda*T - (eps-1)*H for H using the AOGCM N.
+         If the fit is good the inverted curve tracks the model's H. No H_prev
+         before the first EBM-epsilon iteration (Gregory-only), so blank then.
+         """
+         if H_prev is None:
+            format_ax(ax, text=model, xscale="linear", yscale="linear", legend=False)
+            return
+
+         T = bundle.T_full
+         N = bundle.N_full
+         F_ref = fit_params["F_ref"]
+         lmbda = fit_params["lambda"]
+         epsilon = fit_params["epsilon"]
+
+         order = np.argsort(T)
+         ax.scatter(T, H_prev, s=8, alpha=0.5, label="H (EBM-ε soln)")
+         if abs(epsilon - 1.0) > 1e-6:
+            H_inv = (F_ref - N - lmbda * T) / (epsilon - 1.0)
+            ax.plot(T[order], H_inv[order], color="green",
+                    label=r"$H=(F-N-\lambda T)/(\epsilon-1)$ (AOGCM)")
          format_ax(ax, text=model, xscale="linear", yscale="linear")
 
 
@@ -755,17 +882,24 @@ for run_type in [2, 1, 3]:
          old_params = numeric_params_for_convergence(df).copy()
 
          # Create diagnostic figures for this iteration.
-         step1_fig, step1_axs = make_model_grid(
+         step1_fig, step1_axs, step1_ratio_axs = make_model_grid_with_ratio(
             models,
             title=rf"4xCO$_2$ Net TOA vs T$_{{2M}}$ (radiative fit, iter {iteration + 1})",
             xlabel="2-meter Air Temperature Anomaly (K)",
             ylabel=r"Net TOA Radiative Flux Anomaly ($W\,m^{-2}$)",
+            ratio_ylabel=r"$\frac{F-\lambda T-(\epsilon-1)H}{F-\lambda T}$",
          )
          step1_NH_fig, step1_NH_axs = make_model_grid(
             models,
             title=rf"4xCO$_2$ Net TOA vs Ocean Heat Uptake H (radiative fit, iter {iteration + 1})",
             xlabel=r"Ocean Heat Uptake H ($W\,m^{-2}$)",
             ylabel=r"Net TOA Radiative Flux Anomaly ($W\,m^{-2}$)",
+         )
+         step1_HT_fig, step1_HT_axs = make_model_grid(
+            models,
+            title=rf"4xCO$_2$ Ocean Heat Uptake H vs T$_{{2M}}$ (radiative fit, iter {iteration + 1})",
+            xlabel="2-meter Air Temperature Anomaly (K)",
+            ylabel=r"Ocean Heat Uptake H ($W\,m^{-2}$)",
          )
          step2_fig, step2_axs = make_model_grid(
             models,
@@ -798,8 +932,9 @@ for run_type in [2, 1, 3]:
                   fit = fit_radiative_epsilon(bundle.T_full, bundle.N_full, H_prev)
 
             update_row(df, model, fit)
-            plot_radiative_fit(step1_axs[imodel], bundle, fit, H_prev, model, iteration)
+            plot_radiative_fit(step1_axs[imodel], step1_ratio_axs[imodel], bundle, fit, H_prev, model, iteration)
             plot_radiative_fit_H(step1_NH_axs[imodel], bundle, fit, H_prev, model)
+            plot_uptake_vs_T(step1_HT_axs[imodel], bundle, fit, H_prev, model)
 
          if SAVE_ITERATION_PLOTS:
             suffix = f"iter{iteration + 1:02d}"
@@ -821,8 +956,18 @@ for run_type in [2, 1, 3]:
                   outdir / current_dir / "step1" / "pdf" / f"4xCO2_all_models_H_vs_NETTOA_{suffix}.pdf",
                   bbox_inches="tight",
             )
+            step1_HT_fig.savefig(
+                  outdir / current_dir / "step1" / "png" / f"4xCO2_all_models_H_vs_T2M_{suffix}.png",
+                  dpi=200,
+                  bbox_inches="tight",
+            )
+            step1_HT_fig.savefig(
+                  outdir / current_dir / "step1" / "pdf" / f"4xCO2_all_models_H_vs_T2M_{suffix}.pdf",
+                  bbox_inches="tight",
+            )
          plt.close(step1_fig)
          plt.close(step1_NH_fig)
+         plt.close(step1_HT_fig)
 
          if VERBOSE:
             print("Finished Step 1: F_ref, lambda, epsilon, T_eq updated")
@@ -1380,6 +1525,7 @@ for run_type in [2, 1, 3]:
          lmbda = float(row["lambda"])
          epsilon = float(row["epsilon"])
          C = float(row["C"])
+         C0 = float(row["C0"])
          T_eq = float(row["T_eq"])
          a_f = float(row["a_f"])
          a_s = float(row["a_s"])
@@ -1558,13 +1704,13 @@ for run_type in [2, 1, 3]:
             
          ax = nettoa_axs[imodel]
          if len(N_obs_roll) > 0:
-             ax.plot(t_roll, N_obs_roll, color="black", label="AOGCM")
-            
-             ax.plot(
-                 t_roll,
-                 F_ref - lmbda * T_obs_roll - (epsilon - 1.0) * H_fit_roll,
-                 label=r"$F-\lambda T-(\epsilon-1)H$",
-             )
+            ax.plot(t_roll, N_obs_roll, color="black", label="AOGCM")
+         
+            ax.plot(
+               t_roll,
+               F_ref - lmbda * T_obs_roll - (epsilon - 1.0) * H_fit_roll,
+               label=r"$F-\lambda T-(\epsilon-1)H$",
+            )
 
          if results == "unblinded":
              ax.plot(t, N_fit, label="EBM-ε fit")
@@ -1577,7 +1723,13 @@ for run_type in [2, 1, 3]:
             T_long = T_model(t_long, T_eq, a_f, a_s, tau_f, tau_s)
             N_long = ebm_epsilon_nettoa(t_long, F_ref, lmbda, epsilon, C, T_eq, a_f, a_s, tau_f, tau_s)
 
-            normalized_OHC_pred = (5.1e14 * 31536000 * np.cumsum(N_long)) / (1.37e21 * 3850)
+            # Prediction reference = (C+C0)*A, the two-box model's TOTAL heat
+            # capacity (C, C0 in W yr m^-2 K^-1, x YEAR -> J m^-2 K^-1) -- the
+            # analog of the diffusive scripts' rho_cp*z_max*A -- so
+            # normalized_OHC_pred/T_eq -> 1 at equilibrium. The AOGCM data keeps
+            # the real-ocean normalization (1.37e21 kg x 3850 J/kg/K).
+            ohc_ref = 5.1e14 * (C + C0) * 31536000       # OHC_eq / T_eq  [J/K]
+            normalized_OHC_pred = (5.1e14 * 31536000 * np.cumsum(N_long)) / ohc_ref
             normalized_OHC = (5.1e14 * 31536000 * np.cumsum(N_obs)) / (1.37e21 * 3850)
 
             ax = ohct_axs[imodel]
