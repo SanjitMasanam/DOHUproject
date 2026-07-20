@@ -658,7 +658,7 @@ tcr = {
 }
 
 # Output directory (created once; per-run_type subdirs are made inside the loop)
-outdir = Path("/nbhome/Sanjit.Masanam/DeepOceanHeatUptakeProject/figures_diffusive-eps-joint")
+outdir = Path("./figures_diffusive-eps-joint")
 outdir.mkdir(exist_ok=True)
 
 for run_type in RUN_TYPES:
@@ -1373,13 +1373,11 @@ for run_type in RUN_TYPES:
                ax_nh = step1_NH_ax_by_model[model]
                ax_nh.scatter(H_reg_final, N_reg, s=8, alpha=0.5, label="Data")
                one_one = np.array([H_reg_final.min(), H_reg_final.max()])
-               ax_nh.plot(one_one, one_one, color="0.5", lw=1.0, ls="-.", label="1:1")
-               ax_nh.plot(H_reg_final, -(eps - 1.0) * H_reg_final, color="0.4", lw=2, ls=":",
-                          label=rf"$N=-(\epsilon-1) H$ ($\epsilon$={eps:.2f})")
+               ax_nh.plot(one_one, one_one, color="0.5", lw=1.0, ls="-.", label="N = H (Analytical Sol.)")
                ax_nh.plot(H_reg_final, N_eps_line, color="green", lw=2, ls="--",
                           label=r"$N=F-\lambda T-(\epsilon-1) H$")
                format_ax(ax_nh, text=f"{model}", xscale="linear", yscale="linear",
-                         legend_loc="upper right")
+                         legend_loc="lower right")
 
                # ----- STEP 1 (H vs T) panel: ocean heat uptake H vs surface -----
                # temperature. PDE fit = the fitted PDE's H at the regression rows
@@ -1408,13 +1406,14 @@ for run_type in RUN_TYPES:
                order_T = np.argsort(T_reg_roll)
                ax_ht.plot(T_reg_roll[order_T], H_reg_roll[order_T], color="lightblue",
                           lw=2, label="H (PDE fit, 10-yr mean)")
+               ax_ht.plot(T_reg_roll[order_T], F_ref/eps - (lmbda/eps)*T_reg_roll[order_T], color="0.5", lw=1.0, ls="-.", label="H (analytical sol.)")
                if abs(eps - 1.0) > 1e-6:
                   H_inv = (F_ref - N_reg_arr - lmbda * T_reg_arr) / (eps - 1.0)
                   H_inv_roll = roll10(H_inv)
                   ax_ht.scatter(T_reg_roll, H_inv_roll, s=8, alpha=0.5, color="green",
                                 label=r"$H=(F-N-\lambda T)/(\epsilon-1)$ (AOGCM, 10-yr mean)")
-               format_ax(ax_ht, text=f"{model}", xscale="linear", yscale="linear",
-                         legend_loc="upper right")
+               format_ax(ax_ht, text=f"{model}\n$\\epsilon$={eps:.2f}", xscale="linear",
+                         yscale="linear", legend_loc="lower left")
 
                # 3D view of the same multilinear regression: (T, H, N) scatter +
                # the fitted plane N = F - lambda*T - (eps-1)*H, one panel/model.
@@ -1636,7 +1635,8 @@ for run_type in RUN_TYPES:
                   sens_hml_uptake_lines[expt].append((line, h_val))
                ax.axhline(0.0, color="0.6", lw=0.8, ls=":")
                ax.plot(plot_t, H_plot, color="black", lw=2, label="Best Fit", zorder=5)
-               format_ax(ax, text=f"{model}", xscale="linear", yscale="linear", legend_loc="upper right")
+               ax.plot(plot_t, F_ref/eps - F_ref/eps*(1-erfcx(np.sqrt(plot_t*(YEAR*(lmbda/eps)**2)/(kappa_pde*4.186e6**2)))), color="blue", lw=2, label="Analytical Solution") # Solution to H for diffusive-eps model (T_eq*lmbda/eps=F_ref/eps)
+               format_ax(ax, text=f"{model}", xscale="linear", yscale="linear", legend_loc="center right")
                ax.text(
                   0.02,
                   0.92,
@@ -1708,7 +1708,8 @@ for run_type in RUN_TYPES:
                ax.text(
                   0.02,
                   0.92,
-                  rf"$\tau_{{1b}}$ = {tau:.0f} yrs" + "\n" + rf"T$_d$ = {T:.0f} yrs, D$_d$ =  {D:.2e} m^2/s" + "\n" + rf"$\kappa_{{1b+d}}$ = {kappa_pde:.2e} m^2/s, h$_{{ml}}$ = {h_ml_pde:.0f} m, $\epsilon$ = {eps:.2f}",
+                  # rf"$\tau_{{1b}}$ = {tau:.0f} yrs" + "\n" + rf"T$_d$ = {T:.0f} yrs, D$_d$ =  {D:.2e} m^2/s" + "\n" + 
+                  rf"$\kappa_{{1b+d}}$ = {kappa_pde:.1e} m^2/s, h$_{{ml}}$ = {h_ml_pde:.0f} m, $\epsilon$ = {eps:.2f}",
                   transform=ax.transAxes,
                   va="top",
                   ha="left",

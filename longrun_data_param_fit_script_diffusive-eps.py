@@ -1155,12 +1155,10 @@ for run_type in RUN_TYPES:
                ax_nh.scatter(H_reg_final, N_reg, s=8, alpha=0.5, label="Data")
                one_one = np.array([H_reg_final.min(), H_reg_final.max()])
                ax_nh.plot(one_one, one_one, color="0.5", lw=1.0, ls="-.", label="1:1")
-               ax_nh.plot(H_reg_final, -(eps - 1.0) * H_reg_final, color="0.4", lw=2, ls=":",
-                          label=rf"$N=-(\epsilon-1) H$ ($\epsilon$={eps:.2f})")
                ax_nh.plot(H_reg_final, N_eps_line, color="green", lw=2, ls="--",
                           label=r"$N=F-\lambda T-(\epsilon-1) H$")
                format_ax(ax_nh, text=f"{model}", xscale="linear", yscale="linear",
-                         legend_loc="upper right")
+                         legend_loc="lower right")
 
                # ----- STEP 1 (H vs T) panel: ocean heat uptake H vs surface -----
                # temperature. Data = the fitted PDE's H at the regression rows;
@@ -1175,8 +1173,8 @@ for run_type in RUN_TYPES:
                   H_inv = (F_ref - N_reg_arr - lmbda * T_reg_arr) / (eps - 1.0)
                   ax_ht.plot(T_reg_arr[order_T], H_inv[order_T], color="green",
                              label=r"$H=(F-N-\lambda T)/(\epsilon-1)$ (AOGCM)")
-               format_ax(ax_ht, text=f"{model}", xscale="linear", yscale="linear",
-                         legend_loc="upper right")
+               format_ax(ax_ht, text=f"{model}\n$\\epsilon$={eps:.2f}", xscale="linear",
+                         yscale="linear", legend_loc="lower left")
 
                # 3D view of the same multilinear regression: (T, H, N) scatter +
                # the fitted plane N = F - lambda*T - (eps-1)*H, one panel/model.

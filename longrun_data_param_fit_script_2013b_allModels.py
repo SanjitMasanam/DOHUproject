@@ -803,12 +803,11 @@ for run_type in [2, 1, 3]:
 
          one_one = np.array([H_prev.min(), H_prev.max()])
          ax.plot(one_one, one_one, color="0.5", lw=1.0, ls="-.", label="1:1")
-         ax.plot(H_prev, -(epsilon - 1.0) * H_prev, color="0.4", lw=2, ls=":",
-                 label=rf"$N=-(\epsilon-1)H$ ($\epsilon$={epsilon:.2f})")
          ax.plot(H_prev, F_ref - lmbda * T - (epsilon - 1.0) * H_prev,
                  color="green", lw=2, ls="--",
                  label=r"$N=F-\lambda T-(\epsilon-1)H$")
-         format_ax(ax, text=model, xscale="linear", yscale="linear")
+         format_ax(ax, text=model, xscale="linear", yscale="linear",
+                   legend_loc="lower right")
 
 
       def plot_uptake_vs_T(ax, bundle, fit_params, H_prev, model):
@@ -835,7 +834,8 @@ for run_type in [2, 1, 3]:
             H_inv = (F_ref - N - lmbda * T) / (epsilon - 1.0)
             ax.plot(T[order], H_inv[order], color="green",
                     label=r"$H=(F-N-\lambda T)/(\epsilon-1)$ (AOGCM)")
-         format_ax(ax, text=model, xscale="linear", yscale="linear")
+         format_ax(ax, text=f"{model}\n$\\epsilon$={epsilon:.2f}", xscale="linear",
+                   yscale="linear", legend_loc="lower left")
 
 
       def plot_slow_fit(ax, slow, model, iteration):
