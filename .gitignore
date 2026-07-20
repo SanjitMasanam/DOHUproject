@@ -4,3 +4,7 @@
 figures_diffusive-eps/
 figures_2013a/
 figures_diffusive/
+
+# Python bytecode cache (regenerated automatically on import).
+__pycache__/
+*.pyc
