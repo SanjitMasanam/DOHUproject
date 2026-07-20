@@ -1,0 +1,6 @@
+# Large figure-output directories: untracked to save /home quota.
+# Prior committed versions remain recoverable from git history
+# (git checkout <commit> -- <dir>).
+figures_diffusive-eps/
+figures_2013a/
+figures_diffusive/
