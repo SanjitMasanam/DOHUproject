@@ -41,7 +41,7 @@ from scipy.optimize import curve_fit
 # Font used for every label/tick/legend on every plot in this script -- change
 # this one value to switch fonts everywhere (falls back to matplotlib's
 # default sans font if the named font isn't installed on this machine).
-PLOT_FONT_FAMILY = "Tahoma"
+PLOT_FONT_FAMILY = "Verdana"
 mpl.rcParams["font.family"] = PLOT_FONT_FAMILY
 
 # --- shared plot-styling sizes (keep identical across all longrun scripts) ---
@@ -295,7 +295,6 @@ for run_type in [2, 1, 3]:
       def ensure_dirs(outdir, current_dir, sections):
          for section in sections:
             (outdir / current_dir / section / "png").mkdir(parents=True, exist_ok=True)
-            (outdir / current_dir / section / "pdf").mkdir(parents=True, exist_ok=True)
          (outdir / current_dir / "tables").mkdir(parents=True, exist_ok=True)
 
 
@@ -943,26 +942,14 @@ for run_type in [2, 1, 3]:
                   dpi=200,
                   bbox_inches="tight",
             )
-            step1_fig.savefig(
-                  outdir / current_dir / "step1" / "pdf" / f"4xCO2_all_models_T2M_vs_NETTOA_{suffix}.pdf",
-                  bbox_inches="tight",
-            )
             step1_NH_fig.savefig(
                   outdir / current_dir / "step1" / "png" / f"4xCO2_all_models_H_vs_NETTOA_{suffix}.png",
                   dpi=200,
                   bbox_inches="tight",
             )
-            step1_NH_fig.savefig(
-                  outdir / current_dir / "step1" / "pdf" / f"4xCO2_all_models_H_vs_NETTOA_{suffix}.pdf",
-                  bbox_inches="tight",
-            )
             step1_HT_fig.savefig(
                   outdir / current_dir / "step1" / "png" / f"4xCO2_all_models_H_vs_T2M_{suffix}.png",
                   dpi=200,
-                  bbox_inches="tight",
-            )
-            step1_HT_fig.savefig(
-                  outdir / current_dir / "step1" / "pdf" / f"4xCO2_all_models_H_vs_T2M_{suffix}.pdf",
                   bbox_inches="tight",
             )
          plt.close(step1_fig)
@@ -1050,10 +1037,6 @@ for run_type in [2, 1, 3]:
                   dpi=200,
                   bbox_inches="tight",
             )
-            step2_fig.savefig(
-                  outdir / current_dir / "step2" / "pdf" / f"4xCO2_all_models_log_Teq_minus_T_vs_t_{suffix}.pdf",
-                  bbox_inches="tight",
-            )
          plt.close(step2_fig)
 
          if VERBOSE:
@@ -1126,7 +1109,7 @@ for run_type in [2, 1, 3]:
       smap.set_array([])
       cbar = fig3d.colorbar(smap, ax=list(axs3d), fraction=0.015, pad=0.02)
       cbar.set_label(r"N residual (obs $-$ fit) [W m$^{-2}$]", fontsize=13, fontweight="bold")
-      for ext, kw in (("png", {"dpi": 200}), ("pdf", {})):
+      for ext, kw in (("png", {"dpi": 200})):
          fig3d.savefig(
             outdir / current_dir / "step1" / ext / f"4xCO2_all_models_N_T_H_regression3d{run_type_suffix}.{ext}",
             bbox_inches="tight", **kw,
@@ -1268,10 +1251,6 @@ for run_type in [2, 1, 3]:
             dpi=200,
             bbox_inches="tight",
          )
-         fig_val.savefig(
-            outdir / current_dir / "validation" / "pdf" / "all_validation_params_GF_vs_SN.pdf",
-            bbox_inches="tight",
-         )
          plt.close(fig_val)
       else:
          print("Skipping validation plot: none of the hard-coded paper model names are present in df.")
@@ -1374,7 +1353,7 @@ for run_type in [2, 1, 3]:
 
       def plot_surface_budget_bars(model, F_ref, lmbda, epsilon, C, T_eq,
                                    a_f, a_s, tau_f, tau_s, t_final_years,
-                                   png_path, pdf_path, n_save=60):
+                                   png_path, n_save=60):
          """Stacked-bar decomposition of the surface tendency dT/dt for the final
          EBM-epsilon (Geoffroy 2013b) fit, one bar per (log-spaced) time step. The
          upper-layer surface node obeys
@@ -1471,7 +1450,6 @@ for run_type in [2, 1, 3]:
          ax2.set_xlim(left[0], right[-1])
          ax2.set_xlabel("Time (years)", fontsize=14, fontweight="bold")
          fig.savefig(str(png_path), dpi=150, bbox_inches="tight")
-         fig.savefig(str(pdf_path), bbox_inches="tight")
          plt.close(fig)
 
 
@@ -1546,7 +1524,6 @@ for run_type in [2, 1, 3]:
             model, F_ref, lmbda, epsilon, C, T_eq, a_f, a_s, tau_f, tau_s,
             float(np.max(t)),
             outdir / current_dir / "budget" / "png" / f"{model}_surface_budget_bars.png",
-            outdir / current_dir / "budget" / "pdf" / f"{model}_surface_budget_bars.pdf",
          )
 
          # ----------------- T2M time-series plot -----------------
@@ -1787,18 +1764,10 @@ for run_type in [2, 1, 3]:
             dpi=200,
             bbox_inches="tight",
          )
-         final_fig.savefig(
-            outdir / current_dir / results / "pdf" / f"4xCO2_all_models_T2m_vs_t_{results}_{scale}.pdf",
-            bbox_inches="tight",
-         )
 
          nettoa_fig.savefig(
             outdir / current_dir / results / "png" / f"4xCO2_all_models_NETTOA_timeseries_{scale}.png",
             dpi=200,
-            bbox_inches="tight",
-         )
-         nettoa_fig.savefig(
-            outdir / current_dir / results / "pdf" / f"4xCO2_all_models_NETTOA_timeseries_{scale}.pdf",
             bbox_inches="tight",
          )
 
@@ -1824,20 +1793,12 @@ for run_type in [2, 1, 3]:
          dpi=200,
          bbox_inches="tight",
       )
-      tau_s_fig.savefig(
-         outdir / current_dir / "step2" / "pdf" / f"4xCO2_all_models_tau_s_vs_calibration_t{run_type_suffix}.pdf",
-         bbox_inches="tight",
-      )
       plt.close(tau_s_fig)
 
       if results == "unblinded":
          assmpt_fig.savefig(
             outdir / current_dir / results / "png" / f"4xCO2_all_models_cdTdt_t_{results}.png",
             dpi=200,
-            bbox_inches="tight",
-         )
-         assmpt_fig.savefig(
-            outdir / current_dir / results / "pdf" / f"4xCO2_all_models_cdTdt_t_{results}.pdf",
             bbox_inches="tight",
          )
          plt.close(assmpt_fig)
@@ -1849,10 +1810,6 @@ for run_type in [2, 1, 3]:
          ohct_fig.savefig(
             outdir / current_dir / results / "png" / "4xCO2_all_models_ohc_ts.png",
             dpi=200,
-            bbox_inches="tight",
-         )
-         ohct_fig.savefig(
-            outdir / current_dir / results / "pdf" / "4xCO2_all_models_ohc_ts.pdf",
             bbox_inches="tight",
          )
          plt.close(ohct_fig)

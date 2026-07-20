@@ -19,7 +19,7 @@ from pde_solver_1lyrEBM_diffusive import Params as PDEParams, solve_model as pde
 # Font used for every label/tick/legend on every plot in this script -- change
 # this one value to switch fonts everywhere (falls back to matplotlib's
 # default sans font if the named font isn't installed on this machine).
-PLOT_FONT_FAMILY = "Tahoma"
+PLOT_FONT_FAMILY = "Verdana"
 mpl.rcParams["font.family"] = PLOT_FONT_FAMILY
 
 # --- shared plot-styling sizes (keep identical across all longrun scripts) ---
@@ -297,7 +297,7 @@ def plot_regression_3d(ax, T, H, N, F, lam, eps, model, cmap="RdBu_r", resid_nor
 
 
 def plot_surface_budget_bars(model, kappa, h_ml, eps, F_ref, T_eq, t_final_years,
-                             png_path, pdf_path, dz_target=PDE_FIT_DZ_TARGET):
+                             png_path, dz_target=PDE_FIT_DZ_TARGET):
    """Stacked-bar decomposition of the surface tendency dT_s/dt for the best-fit
    PDE solution, one bar per saved time step. The surface node the solver
    integrates is
@@ -400,7 +400,6 @@ def plot_surface_budget_bars(model, kappa, h_ml, eps, F_ref, T_eq, t_final_years
    ax2.set_xlim(left[0], right[-1])
    ax2.set_xlabel("Time (years)", fontsize=14, fontweight="bold")
    fig.savefig(str(png_path), dpi=150, bbox_inches="tight")
-   fig.savefig(str(pdf_path), bbox_inches="tight")
    plt.close(fig)
 
 
@@ -596,7 +595,6 @@ for run_type in RUN_TYPES:
       def ensure_dirs(outdir, current_dir, sections):
          for section in sections:
             (outdir / current_dir / section / "png").mkdir(parents=True, exist_ok=True)
-            (outdir / current_dir / section / "pdf").mkdir(parents=True, exist_ok=True)
 
       # Create dataframe to store model parameters
       param_cols = [
@@ -1196,7 +1194,6 @@ for run_type in RUN_TYPES:
                plot_surface_budget_bars(
                   model, kappa_pde, h_ml_pde, eps, F_ref, T_eq, t_final_years,
                   outdir / current_dir / "budget" / "png" / f"{expt}_{model}_surface_budget_bars{suffix}.png",
-                  outdir / current_dir / "budget" / "pdf" / f"{expt}_{model}_surface_budget_bars{suffix}.pdf",
                )
 
                # Ocean heat uptake H(t) [W/m^2] over the plot window, for the
@@ -1573,10 +1570,6 @@ for run_type in RUN_TYPES:
             dpi=200,
             bbox_inches="tight",
          )
-         step1_figs[expt].savefig(
-            outdir / current_dir / "step1" / "pdf" / f"{expt}_all_models_T2M_vs_NETTOA{suffix}.pdf",
-            bbox_inches="tight",
-         )
          plt.close(step1_figs[expt])
 
          step1_NH_figs[expt].savefig(
@@ -1584,19 +1577,11 @@ for run_type in RUN_TYPES:
             dpi=200,
             bbox_inches="tight",
          )
-         step1_NH_figs[expt].savefig(
-            outdir / current_dir / "step1" / "pdf" / f"{expt}_all_models_H_vs_NETTOA{suffix}.pdf",
-            bbox_inches="tight",
-         )
          plt.close(step1_NH_figs[expt])
 
          step1_HT_figs[expt].savefig(
             outdir / current_dir / "step1" / "png" / f"{expt}_all_models_H_vs_T2M{suffix}.png",
             dpi=200,
-            bbox_inches="tight",
-         )
-         step1_HT_figs[expt].savefig(
-            outdir / current_dir / "step1" / "pdf" / f"{expt}_all_models_H_vs_T2M{suffix}.pdf",
             bbox_inches="tight",
          )
          plt.close(step1_HT_figs[expt])
@@ -1616,10 +1601,6 @@ for run_type in RUN_TYPES:
       reg3d_fig.savefig(
          outdir / current_dir / "step1" / "png" / f"4xCO2_all_models_N_T_H_regression3d{suffix}.png",
          dpi=200, bbox_inches="tight",
-      )
-      reg3d_fig.savefig(
-         outdir / current_dir / "step1" / "pdf" / f"4xCO2_all_models_N_T_H_regression3d{suffix}.pdf",
-         bbox_inches="tight",
       )
       plt.close(reg3d_fig)
 
@@ -1648,10 +1629,6 @@ for run_type in RUN_TYPES:
                dpi=200,
                bbox_inches="tight",
             )
-            final_figs[expt].savefig(
-               outdir / current_dir / results / "pdf" / f"{expt}_all_models_T2m_vs_t_{results}_{scale}{suffix}.pdf",
-               bbox_inches="tight",
-            )
 
             for ax, xmax in zip(nettoa_axs[expt], final_xmax[expt]):
                ax.set_xscale(scale)
@@ -1660,10 +1637,6 @@ for run_type in RUN_TYPES:
             nettoa_figs[expt].savefig(
                outdir / current_dir / results / "png" / f"{expt}_all_models_NETTOA_timeseries_{results}_{scale}{suffix}.png",
                dpi=200,
-               bbox_inches="tight",
-            )
-            nettoa_figs[expt].savefig(
-               outdir / current_dir / results / "pdf" / f"{expt}_all_models_NETTOA_timeseries_{results}_{scale}{suffix}.pdf",
                bbox_inches="tight",
             )
 
@@ -1753,10 +1726,6 @@ for run_type in RUN_TYPES:
                   dpi=200,
                   bbox_inches="tight",
                )
-               fig.savefig(
-                  outdir / current_dir / results / "pdf" / f"{expt}_all_models_{name}_{results}_{scale}{suffix}.pdf",
-                  bbox_inches="tight",
-               )
             plt.close(fig)
 
          heatmap_figs_to_save = [
@@ -1769,10 +1738,6 @@ for run_type in RUN_TYPES:
                dpi=200,
                bbox_inches="tight",
             )
-            fig.savefig(
-               outdir / current_dir / results / "pdf" / f"{expt}_all_models_{name}_{results}{suffix}.pdf",
-               bbox_inches="tight",
-            )
             plt.close(fig)
 
          if results == 'unblinded':
@@ -1782,10 +1747,6 @@ for run_type in RUN_TYPES:
             ohc_ts_figs[expt].savefig(
                outdir / current_dir / results / "png" / f"{expt}_all_models_ohc_ts{suffix}.png",
                dpi=200,
-               bbox_inches="tight",
-            )
-            ohc_ts_figs[expt].savefig(
-               outdir / current_dir / results / "pdf" / f"{expt}_all_models_ohc_ts{suffix}.pdf",
                bbox_inches="tight",
             )
             plt.close(ohc_ts_figs[expt])

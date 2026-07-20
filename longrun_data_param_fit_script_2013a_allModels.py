@@ -14,7 +14,7 @@ from matplotlib.ticker import MultipleLocator
 # Font used for every label/tick/legend on every plot in this script -- change
 # this one value to switch fonts everywhere (falls back to matplotlib's
 # default sans font if the named font isn't installed on this machine).
-PLOT_FONT_FAMILY = "Tahoma"
+PLOT_FONT_FAMILY = "Verdana"
 mpl.rcParams["font.family"] = PLOT_FONT_FAMILY
 
 # --- shared plot-styling sizes (keep identical across all longrun scripts) ---
@@ -131,7 +131,6 @@ for run_type in [3, 2, 1]:
       def ensure_dirs(outdir, current_dir, sections):
          for section in sections:
             (outdir / current_dir / section / "png").mkdir(parents=True, exist_ok=True)
-            (outdir / current_dir / section / "pdf").mkdir(parents=True, exist_ok=True)
 
       # Create dataframe to store model parameters
       param_cols = [
@@ -341,10 +340,6 @@ for run_type in [3, 2, 1]:
          step1_figs[expt].savefig(
             outdir / current_dir / "step1" / "png" / f"{expt}_all_models_T2M_vs_NETTOA{suffix}.png",
             dpi=200,
-            bbox_inches="tight",
-         )
-         step1_figs[expt].savefig(
-            outdir / current_dir / "step1" / "pdf" / f"{expt}_all_models_T2M_vs_NETTOA{suffix}.pdf",
             bbox_inches="tight",
          )
          plt.close(step1_figs[expt])
@@ -559,10 +554,6 @@ for run_type in [3, 2, 1]:
             dpi=200,
             bbox_inches="tight",
          )
-         step2_figs[expt].savefig(
-            outdir / current_dir / "step2" / "pdf" / f"{expt}_all_models_log_Teq_minus_T_vs_t{suffix}.pdf",
-            bbox_inches="tight",
-         )
          plt.close(step2_figs[expt])
 
          # Explicitly span every panel to the full extent of all plotted data
@@ -582,10 +573,6 @@ for run_type in [3, 2, 1]:
          tau_s_figs[expt].savefig(
             outdir / current_dir / "step2" / "png" / f"{expt}_all_models_tau_s_vs_calibration_t{suffix}.png",
             dpi=200,
-            bbox_inches="tight",
-         )
-         tau_s_figs[expt].savefig(
-            outdir / current_dir / "step2" / "pdf" / f"{expt}_all_models_tau_s_vs_calibration_t{suffix}.pdf",
             bbox_inches="tight",
          )
          plt.close(tau_s_figs[expt])
@@ -703,10 +690,6 @@ for run_type in [3, 2, 1]:
       fig_val.savefig(
          outdir / current_dir / "validation" / "png" / f"all_validation_params_GF_vs_SN{suffix}.png",
          dpi=200,
-         bbox_inches="tight",
-      )
-      fig_val.savefig(
-         outdir / current_dir / "validation" / "pdf" / f"all_validation_params_GF_vs_SN{suffix}.pdf",
          bbox_inches="tight",
       )
       plt.close(fig_val)
@@ -904,18 +887,10 @@ for run_type in [3, 2, 1]:
                dpi=200,
                bbox_inches="tight",
             )
-            final_figs[expt].savefig(
-               outdir / current_dir / results / "pdf" / f"{expt}_all_models_T2m_vs_t_{results}_{scale}{suffix}.pdf",
-               bbox_inches="tight",
-            )
 
             nettoa_figs[expt].savefig(
                outdir / current_dir / results / "png" / f"{expt}_all_models_NETTOA_timeseries_{scale}{suffix}.png",
                dpi=200,
-               bbox_inches="tight",
-            )
-            nettoa_figs[expt].savefig(
-               outdir / current_dir / results / "pdf" / f"{expt}_all_models_NETTOA_timeseries_{scale}{suffix}.pdf",
                bbox_inches="tight",
             )
 
@@ -928,10 +903,6 @@ for run_type in [3, 2, 1]:
                dpi=200,
                bbox_inches="tight",
             )
-            assmpt_figs[expt].savefig(
-               outdir / current_dir / results / "pdf" / f"{expt}_all_models_cdTdt_t_{results}{suffix}.pdf",
-               bbox_inches="tight",
-            )
             plt.close(assmpt_figs[expt])
 
             # Saved in step 1
@@ -941,10 +912,6 @@ for run_type in [3, 2, 1]:
             ohc_ts_figs[expt].savefig(
                outdir / current_dir / results / "png" / f"{expt}_all_models_ohc_ts{suffix}.png",
                dpi=200,
-               bbox_inches="tight",
-            )
-            ohc_ts_figs[expt].savefig(
-               outdir / current_dir / results / "pdf" / f"{expt}_all_models_ohc_ts{suffix}.pdf",
                bbox_inches="tight",
             )
             plt.close(ohc_ts_figs[expt])

@@ -19,7 +19,7 @@ from pde_solver_1lyrEBM_diffusive import Params as PDEParams, solve_model as pde
 # Font used for every label/tick/legend on every plot in this script -- change
 # this one value to switch fonts everywhere (falls back to matplotlib's
 # default sans font if the named font isn't installed on this machine).
-PLOT_FONT_FAMILY = "Tahoma"
+PLOT_FONT_FAMILY = "Verdana"
 mpl.rcParams["font.family"] = PLOT_FONT_FAMILY
 
 # --- shared plot-styling sizes (keep identical across all longrun scripts) ---
@@ -112,7 +112,7 @@ JOINT_FTOL = 1e-8
 JOINT_XTOL = 1e-8
 JOINT_FD_REL_STEP = 1e-6         # relative forward-difference step for the parallel Jacobian
 # Bounds, in theta order [log10(kappa), h_ml, eps, lambda]. T_eq is fixed (STEP 1).
-JOINT_BOUNDS_LO = np.array([np.log10(1e-7),  1e-3, 0.0, 0.05])
+JOINT_BOUNDS_LO = np.array([np.log10(1e-7),  100, 0.0, 0.05])
 JOINT_BOUNDS_HI = np.array([np.log10(1e-3), 300.0, 3.0, 5.00])
 JOINT_PARAM_NAMES = ["kappa", "h_ml", "eps", "lambda"]
 # Diagnostic thresholds for the "is this parameter well optimized?" report.
@@ -121,7 +121,7 @@ JOINT_BOUND_RTOL = 1e-3          # flag AT-BOUND if within this frac of the boun
 JOINT_COND_THRESH = 1e8          # flag DEGENERATE if cond(J^T J) exceeds this
 
 # Progress/ETA tracking across the whole script (all run_types x results x models).
-RUN_TYPES = [1, 2, 3]
+RUN_TYPES = [3, 2, 1]
 RESULT_KINDS = ["unblinded"]
 _SCRIPT_START_TIME = time.time()
 
@@ -526,7 +526,7 @@ def plot_regression_3d(ax, T, H, N, F, lam, eps, model, cmap="RdBu_r", resid_nor
 
 
 def plot_surface_budget_bars(model, kappa, h_ml, eps, F_ref, T_eq, t_final_years,
-                             png_path, pdf_path, dz_target=PDE_FIT_DZ_TARGET):
+                             png_path, dz_target=PDE_FIT_DZ_TARGET):
    """Stacked-bar decomposition of the surface tendency dT_s/dt for the best-fit
    PDE solution, one bar per saved time step. The surface node the solver
    integrates is
@@ -629,7 +629,6 @@ def plot_surface_budget_bars(model, kappa, h_ml, eps, F_ref, T_eq, t_final_years
    ax2.set_xlim(left[0], right[-1])
    ax2.set_xlabel("Time (years)", fontsize=14, fontweight="bold")
    fig.savefig(str(png_path), dpi=150, bbox_inches="tight")
-   fig.savefig(str(pdf_path), bbox_inches="tight")
    plt.close(fig)
 
 
@@ -659,7 +658,7 @@ tcr = {
 }
 
 # Output directory (created once; per-run_type subdirs are made inside the loop)
-outdir = Path("./figures_diffusive-eps-joint")
+outdir = Path("/nbhome/Sanjit.Masanam/DeepOceanHeatUptakeProject/figures_diffusive-eps-joint")
 outdir.mkdir(exist_ok=True)
 
 for run_type in RUN_TYPES:
@@ -824,7 +823,6 @@ for run_type in RUN_TYPES:
       def ensure_dirs(outdir, current_dir, sections):
          for section in sections:
             (outdir / current_dir / section / "png").mkdir(parents=True, exist_ok=True)
-            (outdir / current_dir / section / "pdf").mkdir(parents=True, exist_ok=True)
 
       # Create dataframe to store model parameters
       param_cols = [
@@ -1251,9 +1249,14 @@ for run_type in RUN_TYPES:
                # RMSE) that weight the two data streams in the joint objective.
                pde_dT_func = make_pde_dT(F_ref, T_eq, t_final_years, 1.0, dz_target_=PDE_FIT_DZ_TARGET,
                                          rtol_=SENSITIVITY_RTOL, atol_=SENSITIVITY_ATOL)
+               # Seed-fit bounds track the joint-fit bounds so the two stay in
+               # sync (JOINT_BOUNDS_* stores log10(kappa); convert to linear here).
                popt_seed, _ = curve_fit(
                   pde_dT_func, fit_t, fit_T_abs,
-                  p0=[1.0e-4, 100.0], bounds=([1e-7, 1e-3], [1e-3, 300.0]), max_nfev=60,
+                  p0=[1.0e-4, 100.0],
+                  bounds=([10.0**JOINT_BOUNDS_LO[0], JOINT_BOUNDS_LO[1]],
+                          [10.0**JOINT_BOUNDS_HI[0], JOINT_BOUNDS_HI[1]]),
+                  max_nfev=60,
                )
                kappa0, h_ml0 = popt_seed
                sigma_T = max(1e-2, float(np.sqrt(np.mean(
@@ -1271,9 +1274,9 @@ for run_type in RUN_TYPES:
                   "big": np.full(int(fit_t.shape[0] + T_reg.shape[0]), 1e3),
                }
                theta0 = np.array([
-                  np.log10(min(max(kappa0, 1e-7), 1e-3)),
-                  min(max(h_ml0, 1e-3), 300.0), 1.0,
-                  max(lmbda, 0.05),
+                  np.log10(min(max(kappa0, 10.0**JOINT_BOUNDS_LO[0]), 10.0**JOINT_BOUNDS_HI[0])),
+                  min(max(h_ml0, JOINT_BOUNDS_LO[1]), JOINT_BOUNDS_HI[1]), 1.0,
+                  max(lmbda, JOINT_BOUNDS_LO[3]),
                ])
                joint = run_joint_fit(theta0, joint_data)
 
@@ -1379,18 +1382,37 @@ for run_type in RUN_TYPES:
                          legend_loc="upper right")
 
                # ----- STEP 1 (H vs T) panel: ocean heat uptake H vs surface -----
-               # temperature. Data = the fitted PDE's H at the regression rows;
-               # curve = H inverted from the efficacy radiative relation using the
-               # AOGCM N, H = (F - N - lambda*T)/(eps-1). If the fit is good the
-               # curve tracks the H data.
+               # temperature. PDE fit = the fitted PDE's H at the regression rows
+               # (light-blue line); AOGCM = H inverted from the efficacy radiative
+               # relation using the AOGCM N, H = (F - N - lambda*T)/(eps-1) (green
+               # dots). Both H and T are 10-yr running-mean smoothed. If the fit is
+               # good the AOGCM dots track the PDE line.
                ax_ht = step1_HT_ax_by_model[model]
                N_reg_arr = np.asarray(N_reg, dtype=float)
-               order_T = np.argsort(T_reg_arr)
-               ax_ht.scatter(T_reg_arr, H_reg_final, s=8, alpha=0.5, label="H (PDE fit)")
+
+               # 10-year running mean over the paired (T, H) regression rows.
+               # Rows are annual when bin_H is False (1 yr/row) and 50-yr-binned
+               # otherwise, so size the window to ~10 years and skip smoothing
+               # when a single row already spans >=10 years.
+               yrs_per_row = 50 if bin_H else 1
+               roll_win = max(1, int(round(10.0 / yrs_per_row)))
+               def roll10(a):
+                  a = np.asarray(a, dtype=float)
+                  if roll_win <= 1 or a.shape[0] < roll_win:
+                     return a
+                  return np.array([a[i:i + roll_win].mean()
+                                   for i in range(a.shape[0] - roll_win + 1)])
+
+               T_reg_roll = roll10(T_reg_arr)
+               H_reg_roll = roll10(H_reg_final)
+               order_T = np.argsort(T_reg_roll)
+               ax_ht.plot(T_reg_roll[order_T], H_reg_roll[order_T], color="lightblue",
+                          lw=2, label="H (PDE fit, 10-yr mean)")
                if abs(eps - 1.0) > 1e-6:
                   H_inv = (F_ref - N_reg_arr - lmbda * T_reg_arr) / (eps - 1.0)
-                  ax_ht.plot(T_reg_arr[order_T], H_inv[order_T], color="green",
-                             label=r"$H=(F-N-\lambda T)/(\epsilon-1)$ (AOGCM)")
+                  H_inv_roll = roll10(H_inv)
+                  ax_ht.scatter(T_reg_roll, H_inv_roll, s=8, alpha=0.5, color="green",
+                                label=r"$H=(F-N-\lambda T)/(\epsilon-1)$ (AOGCM, 10-yr mean)")
                format_ax(ax_ht, text=f"{model}", xscale="linear", yscale="linear",
                          legend_loc="upper right")
 
@@ -1410,7 +1432,6 @@ for run_type in RUN_TYPES:
                plot_surface_budget_bars(
                   model, kappa_pde, h_ml_pde, eps, F_ref, T_eq, t_final_years,
                   outdir / current_dir / "budget" / "png" / f"{expt}_{model}_surface_budget_bars{suffix}.png",
-                  outdir / current_dir / "budget" / "pdf" / f"{expt}_{model}_surface_budget_bars{suffix}.pdf",
                )
 
                # Ocean heat uptake H(t) [W/m^2] over the plot window, for the
@@ -1789,10 +1810,6 @@ for run_type in RUN_TYPES:
             dpi=200,
             bbox_inches="tight",
          )
-         step1_figs[expt].savefig(
-            outdir / current_dir / "step1" / "pdf" / f"{expt}_all_models_T2M_vs_NETTOA{suffix}.pdf",
-            bbox_inches="tight",
-         )
          plt.close(step1_figs[expt])
 
          step1_NH_figs[expt].savefig(
@@ -1800,19 +1817,11 @@ for run_type in RUN_TYPES:
             dpi=200,
             bbox_inches="tight",
          )
-         step1_NH_figs[expt].savefig(
-            outdir / current_dir / "step1" / "pdf" / f"{expt}_all_models_H_vs_NETTOA{suffix}.pdf",
-            bbox_inches="tight",
-         )
          plt.close(step1_NH_figs[expt])
 
          step1_HT_figs[expt].savefig(
             outdir / current_dir / "step1" / "png" / f"{expt}_all_models_H_vs_T2M{suffix}.png",
             dpi=200,
-            bbox_inches="tight",
-         )
-         step1_HT_figs[expt].savefig(
-            outdir / current_dir / "step1" / "pdf" / f"{expt}_all_models_H_vs_T2M{suffix}.pdf",
             bbox_inches="tight",
          )
          plt.close(step1_HT_figs[expt])
@@ -1832,10 +1841,6 @@ for run_type in RUN_TYPES:
       reg3d_fig.savefig(
          outdir / current_dir / "step1" / "png" / f"4xCO2_all_models_N_T_H_regression3d{suffix}.png",
          dpi=200, bbox_inches="tight",
-      )
-      reg3d_fig.savefig(
-         outdir / current_dir / "step1" / "pdf" / f"4xCO2_all_models_N_T_H_regression3d{suffix}.pdf",
-         bbox_inches="tight",
       )
       plt.close(reg3d_fig)
 
@@ -1864,10 +1869,6 @@ for run_type in RUN_TYPES:
                dpi=200,
                bbox_inches="tight",
             )
-            final_figs[expt].savefig(
-               outdir / current_dir / results / "pdf" / f"{expt}_all_models_T2m_vs_t_{results}_{scale}{suffix}.pdf",
-               bbox_inches="tight",
-            )
 
             for ax, xmax in zip(nettoa_axs[expt], final_xmax[expt]):
                ax.set_xscale(scale)
@@ -1876,10 +1877,6 @@ for run_type in RUN_TYPES:
             nettoa_figs[expt].savefig(
                outdir / current_dir / results / "png" / f"{expt}_all_models_NETTOA_timeseries_{results}_{scale}{suffix}.png",
                dpi=200,
-               bbox_inches="tight",
-            )
-            nettoa_figs[expt].savefig(
-               outdir / current_dir / results / "pdf" / f"{expt}_all_models_NETTOA_timeseries_{results}_{scale}{suffix}.pdf",
                bbox_inches="tight",
             )
 
@@ -1969,10 +1966,6 @@ for run_type in RUN_TYPES:
                   dpi=200,
                   bbox_inches="tight",
                )
-               fig.savefig(
-                  outdir / current_dir / results / "pdf" / f"{expt}_all_models_{name}_{results}_{scale}{suffix}.pdf",
-                  bbox_inches="tight",
-               )
             plt.close(fig)
 
          heatmap_figs_to_save = [
@@ -1985,10 +1978,6 @@ for run_type in RUN_TYPES:
                dpi=200,
                bbox_inches="tight",
             )
-            fig.savefig(
-               outdir / current_dir / results / "pdf" / f"{expt}_all_models_{name}_{results}{suffix}.pdf",
-               bbox_inches="tight",
-            )
             plt.close(fig)
 
          if results == 'unblinded':
@@ -1998,10 +1987,6 @@ for run_type in RUN_TYPES:
             ohc_ts_figs[expt].savefig(
                outdir / current_dir / results / "png" / f"{expt}_all_models_ohc_ts{suffix}.png",
                dpi=200,
-               bbox_inches="tight",
-            )
-            ohc_ts_figs[expt].savefig(
-               outdir / current_dir / results / "pdf" / f"{expt}_all_models_ohc_ts{suffix}.pdf",
                bbox_inches="tight",
             )
             plt.close(ohc_ts_figs[expt])
