@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import rpy2.robjects as ro
 import numpy as np
 import pandas as pd
@@ -10,6 +11,32 @@ import sympy as sp
 from matplotlib.lines import Line2D
 from tqdm import tqdm
 from matplotlib.ticker import MultipleLocator
+
+# --- Quick test mode -----------------------------------------------------------
+# Optional CLI flag to run the whole pipeline over only a subset of models, so
+# plotting changes can be checked without waiting for all 8 model fits. The full
+# `models` list is still used to size the 8-panel figure grids (only the run
+# models' panels fill); `fit_models` (below) is what the compute loops iterate.
+_cli = argparse.ArgumentParser(description="Longrun param-fit script")
+_cli.add_argument(
+   "--test", nargs="?", const="2", default=None,
+   help="Quick test mode: run a subset of models. Bare --test = first 2; "
+        "--test N = first N; --test M1,M2 = named models.")
+_TEST_SPEC = _cli.parse_known_args()[0].test
+
+def _apply_test_subset(models):
+   """Return the model subset selected by --test (full list if flag absent)."""
+   if _TEST_SPEC is None:
+      return models
+   spec = _TEST_SPEC
+   if spec.isdigit():
+      return models[:max(1, int(spec))]
+   names = {s.strip() for s in spec.split(",") if s.strip()}
+   unknown = names - set(models)
+   if unknown:
+      raise SystemExit(f"--test: unknown model(s) {sorted(unknown)}; "
+                       f"valid: {models}")
+   return [m for m in models if m in names]   # preserve original order
 
 # Font used for every label/tick/legend on every plot in this script -- change
 # this one value to switch fonts everywhere (falls back to matplotlib's
@@ -165,8 +192,14 @@ for run_type in [3, 2, 1]:
       # Read models and experiments into Python lists
       data = ro.globalenv["int_nettoa_longrun_data"]
       models = ['CCSM3', 'CESM1', 'CNRMCM6', 'ECHAM5', 'GISSE2R', 'IPSLCM5A', 'HadGEM2', 'MPIESM11']
+      # Models actually fit/looped this run. Equal to `models` normally; a subset
+      # under --test. Keep `models` (full) for the 8-panel grid layouts.
+      fit_models = _apply_test_subset(models)
+      if _TEST_SPEC is not None:
+         print(f"*** TEST MODE: running {len(fit_models)}/{len(models)} models: "
+               f"{fit_models} ***")
       expts = list(ro.globalenv["expts"])
-      df["model"] = models
+      df["model"] = fit_models
 
       # Make output directory if needed
       outdir = Path("./figures_2013a")
@@ -235,7 +268,7 @@ for run_type in [3, 2, 1]:
 
       # ----------------- STEP 1 ---------------------
 
-      for model in models:
+      for model in fit_models:
          # Extract model data from the R dataset
          model_data = data.rx2(model)
          t2m_mean = 0.0
@@ -348,7 +381,7 @@ for run_type in [3, 2, 1]:
 
       # ----------------- STEP 2 ---------------------
 
-      for model in models:
+      for model in fit_models:
          # Extract model data for Step 2
          model_data = data.rx2(model)
          t2m_first10_mean = 0.0
@@ -650,6 +683,10 @@ for run_type in [3, 2, 1]:
          tmp_mu_SN_list = []
 
          for model, (face, edge) in zip(model_paperParams.keys(), colors):
+            # Skip models not fit this run (e.g. under --test, where df only holds
+            # the subset) -- their params are absent from df. No-op on a full run.
+            if not (df["model"] == model).any():
+               continue
             mu_GF = model_paperParams[model][var]
             mu_SN = df.loc[df["model"] == model, f"{var}"].iloc[0]
             mu_unc = df.loc[df["model"] == model, f"{var}_unc"].iloc[0]
@@ -682,8 +719,12 @@ for run_type in [3, 2, 1]:
                )
             )
 
-         one_to_one = np.arange(min(tmp_mu_SN_list), max(tmp_mu_SN_list) + 0.001, 0.001)
-         ax.plot(one_to_one, one_to_one, "k--", label=r"$\mu_{\rm GF}=\mu_{\rm SN}$")
+         # tmp_mu_SN_list can be empty if none of the validation-comparison models
+         # were fit this run (e.g. under --test with a subset that excludes them);
+         # skip the 1:1 reference line in that case rather than min()-ing an empty list.
+         if tmp_mu_SN_list:
+            one_to_one = np.arange(min(tmp_mu_SN_list), max(tmp_mu_SN_list) + 0.001, 0.001)
+            ax.plot(one_to_one, one_to_one, "k--", label=r"$\mu_{\rm GF}=\mu_{\rm SN}$")
          format_ax(ax, text=f"{var}", xlabel=r"$\mu_{\rm SN}$", xscale="linear", yscale="linear", legend=False)
          ax.legend(handles=handles, loc='lower left', prop={'weight': 'bold', 'size': 10})
 
@@ -696,7 +737,7 @@ for run_type in [3, 2, 1]:
 
       # ----------------- Plot final results ---------------------
 
-      for model in models:
+      for model in fit_models:
          # Extract model data for plotting results
          model_data = data.rx2(model)
          t2m_mean = 0.0

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import time
 import multiprocessing
 import rpy2.robjects as ro
@@ -124,6 +125,32 @@ JOINT_COND_THRESH = 1e8          # flag DEGENERATE if cond(J^T J) exceeds this
 RUN_TYPES = [3, 2, 1]
 RESULT_KINDS = ["unblinded"]
 _SCRIPT_START_TIME = time.time()
+
+# --- Quick test mode -----------------------------------------------------------
+# Optional CLI flag to run the whole pipeline over only a subset of models, so
+# plotting changes can be checked without waiting for all 8 model fits. The full
+# `models` list is still used to size the 8-panel figure grids (only the run
+# models' panels fill); `fit_models` (below) is what the compute loops iterate.
+_cli = argparse.ArgumentParser(description="Longrun param-fit script")
+_cli.add_argument(
+   "--test", nargs="?", const="2", default=None,
+   help="Quick test mode: run a subset of models. Bare --test = first 2; "
+        "--test N = first N; --test M1,M2 = named models.")
+_TEST_SPEC = _cli.parse_known_args()[0].test
+
+def _apply_test_subset(models):
+   """Return the model subset selected by --test (full list if flag absent)."""
+   if _TEST_SPEC is None:
+      return models
+   spec = _TEST_SPEC
+   if spec.isdigit():
+      return models[:max(1, int(spec))]
+   names = {s.strip() for s in spec.split(",") if s.strip()}
+   unknown = names - set(models)
+   if unknown:
+      raise SystemExit(f"--test: unknown model(s) {sorted(unknown)}; "
+                       f"valid: {models}")
+   return [m for m in models if m in names]   # preserve original order
 
 def _log_spaced_t_eval(t_final_seconds, n_save):
    """Log-spaced solver save grid: t=0, then year 1 to t_final log-spaced.
@@ -644,6 +671,12 @@ ro.r["load"](str(rdata_file))
 
 data = ro.globalenv["int_nettoa_longrun_data"]
 models = ['CCSM3', 'CESM1', 'CNRMCM6', 'ECHAM5', 'GISSE2R', 'IPSLCM5A', 'HadGEM2', 'MPIESM11']
+# Models actually fit/looped this run. Equal to `models` normally; a subset under
+# --test. Keep `models` (full) for the 8-panel grid layouts.
+fit_models = _apply_test_subset(models)
+if _TEST_SPEC is not None:
+   print(f"*** TEST MODE: running {len(fit_models)}/{len(models)} models: "
+         f"{fit_models} ***")
 expts = list(ro.globalenv["expts"])
 
 tcr = {
@@ -839,7 +872,7 @@ for run_type in RUN_TYPES:
          "epsilon_unc",
       ]
       df = pd.DataFrame(columns=param_cols)
-      df["model"] = models
+      df["model"] = fit_models
 
       # STEP 1 stashes each model's radiative-regression arrays (the same
       # 50-yr-binned-or-annual T2M/NETTOA it fit the Gregory line to) here, so
@@ -972,7 +1005,7 @@ for run_type in RUN_TYPES:
 
       # ----- STEP 1: fit F_ref/lambda/T_eq from the 4xCO2 T2M-vs-NETTOA regression -----
 
-      for model in models:
+      for model in fit_models:
          # Extract model data from the R dataset
          model_data = data.rx2(model)
          t2m_mean = 0.0
@@ -1105,7 +1138,7 @@ for run_type in RUN_TYPES:
 
       # ----- STEP 2: fit the box/diffusive/PDE models and plot final results -----
 
-      for model in models:
+      for model in fit_models:
          # Extract model data for plotting results
          model_data = data.rx2(model)
          t2m_mean = 0.0
@@ -1782,11 +1815,11 @@ for run_type in RUN_TYPES:
                # Printed once per model (this is where the sensitivity sweep's
                # PDE solves happen, so it dominates the runtime); the ETA gets
                # more accurate as more models complete.
-               total_model_iters = len(RUN_TYPES) * len(RESULT_KINDS) * len(models)
+               total_model_iters = len(RUN_TYPES) * len(RESULT_KINDS) * len(fit_models)
                completed_model_iters = (
-                  RUN_TYPES.index(run_type) * len(RESULT_KINDS) * len(models)
-                  + RESULT_KINDS.index(results) * len(models)
-                  + (models.index(model) + 1)
+                  RUN_TYPES.index(run_type) * len(RESULT_KINDS) * len(fit_models)
+                  + RESULT_KINDS.index(results) * len(fit_models)
+                  + (fit_models.index(model) + 1)
                )
                elapsed = time.time() - _SCRIPT_START_TIME
                avg_per_model = elapsed / completed_model_iters

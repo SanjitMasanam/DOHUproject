@@ -22,6 +22,7 @@ Expected input:
 Outputs:
   ./2013b_figures/<run_dir>/...
 """
+import argparse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Tuple
@@ -35,6 +36,32 @@ import rpy2.robjects as ro
 import sympy as sp
 from matplotlib.lines import Line2D
 from scipy.optimize import curve_fit
+
+# --- Quick test mode -----------------------------------------------------------
+# Optional CLI flag to run the whole pipeline over only a subset of models, so
+# plotting changes can be checked without waiting for all 8 model fits. The full
+# `models` list is still used to size the 8-panel figure grids (only the run
+# models' panels fill); `fit_models` (below) is what the compute loops iterate.
+_cli = argparse.ArgumentParser(description="Longrun param-fit script")
+_cli.add_argument(
+   "--test", nargs="?", const="2", default=None,
+   help="Quick test mode: run a subset of models. Bare --test = first 2; "
+        "--test N = first N; --test M1,M2 = named models.")
+_TEST_SPEC = _cli.parse_known_args()[0].test
+
+def _apply_test_subset(models):
+   """Return the model subset selected by --test (full list if flag absent)."""
+   if _TEST_SPEC is None:
+      return models
+   spec = _TEST_SPEC
+   if spec.isdigit():
+      return models[:max(1, int(spec))]
+   names = {s.strip() for s in spec.split(",") if s.strip()}
+   unknown = names - set(models)
+   if unknown:
+      raise SystemExit(f"--test: unknown model(s) {sorted(unknown)}; "
+                       f"valid: {models}")
+   return [m for m in models if m in names]   # preserve original order
 
 # ------------------------- User settings -------------------------
 
@@ -76,8 +103,8 @@ REPLICATE_LATE_YEAR_END = 150
 EARLY_YEAR_START = 1
 EARLY_YEAR_END = 10
 
-for run_type in [2, 1, 3]:
-   for results in ["unblinded"]:
+for run_type in [3, 1, 2]:
+   for results in ["unblinded", "validation"]:
       dir_list = [
          "geoffroy_replicate_results",
          "50-yr_avg_forcing_results",
@@ -162,7 +189,9 @@ for run_type in [2, 1, 3]:
                   xlim=None, ylim=None,
                   xticks=None, yticks=None,
                   xspacing=True, yspacing=True,
-                  legend=True, legend_loc='upper right', grid=True):
+                  legend=True, legend_loc='upper right', grid=True,
+                  text_fontsize=None, text_x=0.02, text_ha='left',
+                  tick_labelsize=14, legend_fontsize=12):
 
          ax.set(xscale=xscale, yscale=yscale, xlim=xlim, ylim=ylim)
          if title:  ax.set_title(title, fontweight="bold")
@@ -170,16 +199,17 @@ for run_type in [2, 1, 3]:
          if ylabel: ax.set_ylabel(ylabel, fontweight="bold", fontsize=PANEL_AXIS_FONTSIZE)
 
          if text:
-            ax.text(0.02, 0.98, text, transform=ax.transAxes, weight='bold',
-                     fontsize=MODEL_LABEL_FONTSIZE, va="top", ha="left",
+            ax.text(text_x, 0.98, text, transform=ax.transAxes, weight='bold',
+                     fontsize=(text_fontsize if text_fontsize is not None else MODEL_LABEL_FONTSIZE),
+                     va="top", ha=text_ha,
                      bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4))
 
          if xticks is not None: ax.set_xticks(xticks)
          if yticks is not None: ax.set_yticks(yticks)
 
-         ax.tick_params(labelsize=14, width=2, length=8, direction="in")
+         ax.tick_params(labelsize=tick_labelsize, width=2, length=8, direction="in")
          if grid: ax.grid(alpha=0.3)
-         if legend: ax.legend(loc=legend_loc, prop={'weight': 'bold', 'size': 12})
+         if legend: ax.legend(loc=legend_loc, prop={'weight': 'bold', 'size': legend_fontsize})
 
       def make_model_grid(
          models,
@@ -839,9 +869,12 @@ for run_type in [2, 1, 3]:
 
 
       def plot_slow_fit(ax, slow, model, iteration):
-         ax.scatter(slow["x"], slow["y"], s=8, alpha=0.5, label="AOGCM")
-         ax.plot(slow["x"], slow["yfit"], linewidth=2, label=f"τs={slow['tau_s']:.3g}, as={slow['a_s']:.3g}")
-         format_ax(ax, text=model, xscale="linear", yscale="linear", legend_loc='lower left')
+         ax.scatter(slow["x"], slow["y"], s=5, alpha=0.25, color="red",
+                    edgecolors="none", label="AOGCM")
+         ax.plot(slow["x"], slow["yfit"], linewidth=3, color="blue", zorder=5,
+                 label=rf"$\tau_s$={slow['tau_s']:.3g}, $a_s$={slow['a_s']:.3g}")
+         format_ax(ax, text=model, xscale="linear", yscale="linear", legend_loc='lower left',
+                   grid=False, text_fontsize=20, text_x=0.98, text_ha='right', tick_labelsize=16)
 
 
       # ------------------------- Load R data -------------------------
@@ -855,10 +888,16 @@ for run_type in [2, 1, 3]:
 
       # Convert R strings to plain Python strings if needed.
       models = ['CCSM3', 'CESM1', 'CNRMCM6', 'ECHAM5', 'GISSE2R', 'IPSLCM5A', 'HadGEM2', 'MPIESM11']
+      # Models actually fit/looped this run. Equal to `models` normally; a subset
+      # under --test. Keep `models` (full) for the 8-panel grid layouts.
+      fit_models = _apply_test_subset(models)
+      if _TEST_SPEC is not None:
+         print(f"*** TEST MODE: running {len(fit_models)}/{len(models)} models: "
+               f"{fit_models} ***")
       expts = [str(x) for x in expts]
 
       df = pd.DataFrame(columns=PARAM_COLS)
-      df["model"] = models
+      df["model"] = fit_models
 
       outdir = Path("./figures_2013b")
       outdir.mkdir(exist_ok=True)
@@ -866,7 +905,7 @@ for run_type in [2, 1, 3]:
 
       # Cache all model series so every step uses identical baselines and slices.
       series_by_model: Dict[str, SeriesBundle] = {}
-      for model in models:
+      for model in fit_models:
          series_by_model[model] = make_series_bundle(data.rx2(model), expts)
 
 
@@ -908,7 +947,7 @@ for run_type in [2, 1, 3]:
          )
 
          # ----------------- STEP 1: F, lambda, epsilon -----------------
-         for imodel, model in enumerate(models):
+         for imodel, model in enumerate(fit_models):
             bundle = series_by_model[model]
 
             if iteration == 0:
@@ -960,7 +999,7 @@ for run_type in [2, 1, 3]:
             print("Finished Step 1: F_ref, lambda, epsilon, T_eq updated")
 
          # ----------------- STEP 2: tau_s, a_s, tau_f, C, C0, gamma -----------------
-         for imodel, model in enumerate(models):
+         for imodel, model in enumerate(fit_models):
             bundle = series_by_model[model]
             row = df.loc[df["model"] == model].iloc[0]
 
@@ -1083,7 +1122,7 @@ for run_type in [2, 1, 3]:
          title=r"EBM-$\epsilon$ radiative fit: N = F $-\ \lambda$T $-\ (\epsilon-1)$H",
       )
       reg3d_scatters = []
-      for imodel, model in enumerate(models):
+      for imodel, model in enumerate(fit_models):
          bundle = series_by_model[model]
          row = df.loc[df["model"] == model].iloc[0]
          F = float(row["F_ref"]); lam = float(row["lambda"]); eps = float(row["epsilon"])
@@ -1109,11 +1148,10 @@ for run_type in [2, 1, 3]:
       smap.set_array([])
       cbar = fig3d.colorbar(smap, ax=list(axs3d), fraction=0.015, pad=0.02)
       cbar.set_label(r"N residual (obs $-$ fit) [W m$^{-2}$]", fontsize=13, fontweight="bold")
-      for ext, kw in (("png", {"dpi": 200})):
-         fig3d.savefig(
-            outdir / current_dir / "step1" / ext / f"4xCO2_all_models_N_T_H_regression3d{run_type_suffix}.{ext}",
-            bbox_inches="tight", **kw,
-         )
+      fig3d.savefig(
+         outdir / current_dir / "step1" / "png" / f"4xCO2_all_models_N_T_H_regression3d{run_type_suffix}.png",
+         dpi=200, bbox_inches="tight",
+      )
       plt.close(fig3d)
 
       # ------------------------- Compare parameters to paper values -------------------------
@@ -1460,7 +1498,6 @@ for run_type in [2, 1, 3]:
          right=0.95, wspace=0.28,
       )
       final_xmax = []
-      final_fig.text(0.975, 0.5, "Equilibrium Ratio", ha='center', va='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold", rotation=-90.)
 
       nettoa_fig, nettoa_axs = make_model_grid(
          models,
@@ -1470,8 +1507,8 @@ for run_type in [2, 1, 3]:
 
       tau_s_fig, tau_s_axs = make_model_grid(
          models,
-         title=r"4xCO$_{2}$ $\tau_s$ vs. Calibration Time",
-         xlabel=r"Calibration Time (years)", ylabel=r"$\tau_s$ (years)",
+         title=r"4xCO$_{2}$ $\tau_s$ vs. Calibration Window",
+         xlabel=r"Calibration Window (years)", ylabel=r"$\tau_s$ (years)",
          sharex=True, sharey=True,
       )
 
@@ -1495,7 +1532,7 @@ for run_type in [2, 1, 3]:
       sc_for_cbar = None
       rng = np.random.default_rng(12345)
 
-      for imodel, model in enumerate(models):
+      for imodel, model in enumerate(fit_models):
          t, T_obs, N_obs = make_result_series(data.rx2(model), results)
          row = df.loc[df["model"] == model].iloc[0]
 
@@ -1529,8 +1566,8 @@ for run_type in [2, 1, 3]:
          # ----------------- T2M time-series plot -----------------
          ax = final_axs[imodel]
          ax.scatter(t, T_obs, s=4, color="red")
-         ax.plot(t, T_obs, color="red", label="2-m Surface Temp.")
-         ax.plot(t, T_fit, color="blue", label="EBM-ε Fit")
+         ax.plot(t, T_obs, color="red", label="AOGCM")
+         ax.plot(t, T_fit, color="blue", label="2-Box", linewidth=2.5, zorder=5)
 
          iterations = 1000
          if np.all(np.isfinite([T_eq_unc, a_s_unc, tau_f_unc, tau_s_unc])):
@@ -1550,23 +1587,28 @@ for run_type in [2, 1, 3]:
                   T_ensemble = np.vstack(T_ensemble)
                   T_mean = np.nanmean(T_ensemble, axis=0)
                   T_std = np.nanstd(T_ensemble, axis=0)
-                  ax.fill_between(t, T_mean - 2 * T_std, T_mean + 2 * T_std, color="blue", alpha=0.08, label="±2σ")
-                  ax.fill_between(t, T_mean - T_std, T_mean + T_std, color="blue", alpha=0.20, label="±1σ")
+                  ax.fill_between(t, T_mean - 2 * T_std, T_mean + 2 * T_std, color="blue", alpha=0.08, label="_nolegend_")
+                  ax.fill_between(t, T_mean - T_std, T_mean + T_std, color="blue", alpha=0.20, label="_nolegend_")
 
-         ax.text(
-            0.02,
-            0.92,
-            f"$\\tau_s$ = {tau_s:.1f} yr\n$\\epsilon$ = {epsilon:.2f}",
-            transform=ax.transAxes,
-            va="top",
-            ha="left",
-            fontsize=EXTRA_TEXT_FONTSIZE,
-            bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4),
-         )
-         ax.axvline(150, color="orange", linestyle=":", linewidth=1, alpha=0.7)
+         ax.axvline(150, color="orange", linestyle="--", linewidth=2.5, alpha=0.7)
+         # "Year 150" label written vertically just to the RIGHT of the line
+         # (offset in points so it never overlaps the line).
+         ax.annotate("Year 150", xy=(150, 0.25), xycoords=ax.get_xaxis_transform(),
+                     xytext=(2, 0), textcoords="offset points",
+                     rotation=270, va="top", ha="left", fontweight="bold",
+                     fontsize=EXTRA_TEXT_FONTSIZE, color="orange")
 
          y_bottom, y_top = 1, 1.25 * T_eq
          ratio_ticks = np.arange(0.2, 1.21, 0.2)
+
+         # Thick dashed line marking equilibrium (T = T_eq, i.e. T/T_eq = 1),
+         # replacing the former right-hand Equilibrium-Ratio axis. Labelled on
+         # the line itself at the right edge.
+         ax.axhline(T_eq, color="0.4", ls="--", lw=2.5)
+         ax.text(0.0625, T_eq, r"$T_{eq}$", transform=ax.get_yaxis_transform(),
+                 ha="right", va="bottom", fontweight="bold",
+                 fontsize=EXTRA_TEXT_FONTSIZE, color="0.5")
+
          format_ax(
             ax,
             text=model,
@@ -1574,16 +1616,15 @@ for run_type in [2, 1, 3]:
             yscale="linear",
             ylim=(y_bottom, y_top),
             yticks=ratio_ticks * T_eq,
+            legend=(imodel == 0),
             legend_loc='lower right',
+            grid=False,
+            text_fontsize=20,
+            tick_labelsize=16,
          )
+         # Show y-axis tick labels to a single decimal place.
+         ax.yaxis.set_major_formatter(mpl.ticker.FormatStrFormatter("%.1f"))
          final_xmax.append(np.max(t))
-
-         # Secondary y-axis showing T/T_eq (Equilibrium Ratio) on the same scale;
-         # ratio ticks match the left axis's fractions so gridlines line up exactly.
-         ax2 = ax.twinx()
-         ax2.set_ylim(y_bottom / T_eq, y_top / T_eq)
-         ax2.set_yticks(ratio_ticks)
-         ax2.tick_params(labelsize=14, width=2, length=8, direction="in")
 
          # ----------------- tau_s vs. calibration length plot -----------------
          # Only meaningful for run_type == 3 (50-yr avg + LR param fit), where we
@@ -1619,45 +1660,13 @@ for run_type in [2, 1, 3]:
                tau_s_lst.append(-1 / m_slope)
 
             ax = tau_s_axs[imodel]
-            ax.plot(cal_lengths, tau_s_lst)
+            ax.plot(cal_lengths, tau_s_lst, color="blue", linewidth=2.5)
             # Only extends to this model's own last data point, so the line's
             # length visually encodes how long each model's run was.
-            ax.plot(cal_lengths, cal_lengths, label='y=x', color='black')
+            ax.plot(cal_lengths, cal_lengths, label='1:1', color='black')
 
-            fitted_params_path1 = outdir / dir_list[0] / "fitted_model_params.csv"
-            fitted_params_path2 = outdir / dir_list[1] / "fitted_model_params.csv"
-            fitted_params_path3 = outdir / dir_list[2] / "fitted_model_params.csv"
-
-            if fitted_params_path1.is_file() and fitted_params_path2.is_file() and fitted_params_path3.is_file():
-               df_runType1 = pd.read_csv(fitted_params_path1)
-               df_runType2 = pd.read_csv(fitted_params_path2)
-               df_runType3 = pd.read_csv(fitted_params_path3)
-
-               tau_s_runType1 = df_runType1.loc[df_runType1['model'] == model, "tau_s"].iloc[0]
-               tau_s_runType2 = df_runType2.loc[df_runType2['model'] == model, "tau_s"].iloc[0]
-               tau_s_runType3 = df_runType3.loc[df_runType3['model'] == model, "tau_s"].iloc[0]
-
-               ax.scatter(151, tau_s_runType1, s=14, color='red', label=r'Geoffroy 2013b')
-               ax.scatter(151, tau_s_runType2, s=14, color='yellow', label=r'50-yr Avg T$_{eq}$')
-               ax.scatter(len(T_4x_raw), tau_s_runType3, s=14, color='green', label=r'50-yr Avg + LR Fit')
-
-            # How close this model actually got to equilibrium by the end
-            # of its own run (last-10-yr mean T2M anomaly / T_eq), shown as
-            # extra text under the model-name label.
-            eq_ratio = float((np.mean(T_4x_raw[-10:]) - T_base_full) / T_eq)
-
-            ax.text(
-               0.02,
-               0.92,
-               f"$Reached {eq_ratio * 100:.0f}% of $T_{{eq}}$",
-               transform=ax.transAxes,
-               va="top",
-               ha="left",
-               fontsize=EXTRA_TEXT_FONTSIZE,
-               bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4),
-            )
-
-            format_ax(ax, text=f"{model}", xscale="linear", yscale="linear", legend_loc='upper right')
+            format_ax(ax, text=f"{model}", xscale="linear", yscale="linear",
+                      legend=False, grid=False, text_fontsize=20, tick_labelsize=16)
 
          # ----------------- NETTOA time-series plot -----------------
          T_obs_roll = rolling_mean(T_obs, window=10)
@@ -1714,22 +1723,18 @@ for run_type in [2, 1, 3]:
             norm = mpl.colors.Normalize(vmin=0, vmax=max(6000, len(T_obs)))
             sc_for_cbar = ax.scatter(T_obs / T_eq, normalized_OHC / T_eq, c=t, cmap=cmap, norm=norm)
 
-            if len(T_obs) >= 5:
-                  m_ohcTs, b_ohcTs = np.polyfit(T_obs[:5] / T_eq, normalized_OHC[:5] / T_eq, 1)
-                  t_val = np.arange(0, 1.1, 0.1)
-                  ax.plot(t_val, m_ohcTs * t_val + b_ohcTs, ls="--", color="red", label=f"Mixed Layer Depth = {(m_ohcTs * 2500):.0f} m")
-            else:
-                  t_val = np.arange(0, 1.1, 0.1)
+            t_val = np.arange(0, 1.1, 0.1)
 
             A = np.nan
             if model in tcr and np.isfinite(T_eq) and T_eq != 0:
                   A = 2 * tcr[model] / T_eq
-                  ax.plot(t_val, (t_val - A) / (1 - A), ls="--", color="black", label="2-box Asymptotic Pred.")
+                  ax.plot(t_val, (t_val - A) / (1 - A), ls="--", color="black", label="2-Box (Asymptotic)")
                   ax.axvline(A, color="0.55", ls="--", lw=0.8)
 
-            ax.plot(T_long / T_eq, normalized_OHC_pred / T_eq, color="green", label="EBM-ε Pred.")
+            ax.plot(T_long / T_eq, normalized_OHC_pred / T_eq, color="red", label="2-Box (Fit)")
             ax.axvline(1.0, color="0.55", ls="--", lw=0.8)
-            format_ax(ax, text=model, xscale="linear", yscale="linear", ylim=(-0.05, 1.2))
+            format_ax(ax, text=model, xscale="linear", yscale="linear", ylim=(-0.05, 1.2), legend_loc='center left',
+                      grid=False, text_fontsize=20, tick_labelsize=16, legend_fontsize=15)
 
             # ----------------- C dT/dt assumption-test plot -----------------
             dT_dt_fit = np.gradient(T_fit)
@@ -1749,10 +1754,15 @@ for run_type in [2, 1, 3]:
       for scale in ["linear", "log"]:
          for ax, xmax in zip(final_axs, final_xmax):
             ax.set_xscale(scale)
-            ax.set_xlim(1, xmax + 1)
             if scale == "linear":
-               ax.set_xticks(np.linspace(1, xmax + 1, 5))
+               # Extend the left edge to -10 yr, keep the first tick at year 1,
+               # and end the ticks at the nearest 500-yr multiple below the run
+               # length (e.g. 4460 -> 4000), with 4 ticks per panel.
+               ax.set_xlim(-10, xmax + 1)
+               last_tick = np.floor(xmax / 500.0) * 500.0
+               ax.set_xticks(np.linspace(1, last_tick, 4))
             else:
+               ax.set_xlim(1, xmax + 1)
                ax.xaxis.set_major_locator(mpl.ticker.LogLocator())
 
          for ax, xmax in zip(nettoa_axs, final_xmax):
@@ -1784,9 +1794,17 @@ for run_type in [2, 1, 3]:
          for ax in tau_s_axs:
             ax.set_xlim(0, xmax + 100)
             ax.set_ylim(0, ymax + 100)
-            # Denser tick marks than the default locator gives.
-            ax.xaxis.set_major_locator(mpl.ticker.MaxNLocator(nbins=10))
-            ax.yaxis.set_major_locator(mpl.ticker.MaxNLocator(nbins=10))
+            # Label ticks every 1200 years on both (years) axes.
+            ax.xaxis.set_major_locator(mpl.ticker.MultipleLocator(1200))
+            ax.yaxis.set_major_locator(mpl.ticker.MultipleLocator(1200))
+            # Tick marks on all 4 sides (labels stay on left/bottom only).
+            ax.tick_params(which="both", top=True, right=True,
+                           direction="in", width=2, length=8)
+         # Label the 1:1 line on the line itself (diagonal of the square panel).
+         for ax in populated_axs:
+            ax.text(0.6, 0.6, "1:1", transform=ax.transAxes, rotation=45,
+                    fontweight="bold", fontsize=EXTRA_TEXT_FONTSIZE,
+                    va="bottom", ha="center")
 
       tau_s_fig.savefig(
          outdir / current_dir / "step2" / "png" / f"4xCO2_all_models_tau_s_vs_calibration_t{run_type_suffix}.png",
@@ -1804,8 +1822,10 @@ for run_type in [2, 1, 3]:
          plt.close(assmpt_fig)
 
          if sc_for_cbar is not None:
-            cbar = ohct_fig.colorbar(sc_for_cbar, ax=ohct_axs.ravel().tolist(), fraction=0.025, pad=0.025)
-            cbar.set_label("Year")
+            cbar = ohct_fig.colorbar(sc_for_cbar, ax=ohct_axs.ravel().tolist(),
+                                     fraction=0.012, pad=0.02, shrink=0.6)
+            cbar.set_label("Year", fontsize=18, fontweight="bold")
+            cbar.ax.tick_params(labelsize=16)
 
          ohct_fig.savefig(
             outdir / current_dir / results / "png" / "4xCO2_all_models_ohc_ts.png",
