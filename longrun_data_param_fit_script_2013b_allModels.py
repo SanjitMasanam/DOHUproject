@@ -1661,9 +1661,9 @@ for run_type in [3, 1, 2]:
 
             ax = tau_s_axs[imodel]
             ax.plot(cal_lengths, tau_s_lst, color="blue", linewidth=2.5)
-            # Only extends to this model's own last data point, so the line's
-            # length visually encodes how long each model's run was.
-            ax.plot(cal_lengths, cal_lengths, label='1:1', color='black')
+            # The true 1:1 line (y = x in data coordinates) is drawn later,
+            # after the shared x/y limits are set, so it stays a genuine
+            # diagonal even when the x and y ranges differ.
 
             format_ax(ax, text=f"{model}", xscale="linear", yscale="linear",
                       legend=False, grid=False, text_fontsize=20, tick_labelsize=16)
@@ -1791,18 +1791,33 @@ for run_type in [3, 1, 2]:
       if populated_axs:
          xmax = max(ax.dataLim.intervalx[1] for ax in populated_axs)
          ymax = max(ax.dataLim.intervaly[1] for ax in populated_axs)
+         # Common upper limit for both axes so every panel is square (equal
+         # x and y range) and the 1:1 line is a true 45-degree diagonal.
+         hi = max(xmax, ymax) + 100
          for ax in tau_s_axs:
-            ax.set_xlim(0, xmax + 100)
-            ax.set_ylim(0, ymax + 100)
+            ax.set_xlim(0, hi)
+            ax.set_ylim(0, hi)
+            # True 1:1 line (y = x) in data coordinates, drawn now that the
+            # shared limits are fixed. Clipped to the panel.
+            ax.plot([0, hi], [0, hi], color="black", label="1:1")
             # Label ticks every 1200 years on both (years) axes.
             ax.xaxis.set_major_locator(mpl.ticker.MultipleLocator(1200))
             ax.yaxis.set_major_locator(mpl.ticker.MultipleLocator(1200))
             # Tick marks on all 4 sides (labels stay on left/bottom only).
             ax.tick_params(which="both", top=True, right=True,
                            direction="in", width=2, length=8)
-         # Label the 1:1 line on the line itself (diagonal of the square panel).
+         # Label the 1:1 line on the line itself. Position in data coordinates
+         # along y = x; rotate to the line's true on-screen angle so the text
+         # tracks the diagonal even when x and y ranges (and thus the visual
+         # slope) differ.
          for ax in populated_axs:
-            ax.text(0.6, 0.6, "1:1", transform=ax.transAxes, rotation=45,
+            x_lo, x_hi = ax.get_xlim()
+            y_lo, y_hi = ax.get_ylim()
+            v = 0.6 * min(x_hi, y_hi)
+            p0 = ax.transData.transform((0.0, 0.0))
+            p1 = ax.transData.transform((1.0, 1.0))
+            angle = np.degrees(np.arctan2(p1[1] - p0[1], p1[0] - p0[0]))
+            ax.text(v, v, "1:1", rotation=angle, rotation_mode="anchor",
                     fontweight="bold", fontsize=EXTRA_TEXT_FONTSIZE,
                     va="bottom", ha="center")
 
