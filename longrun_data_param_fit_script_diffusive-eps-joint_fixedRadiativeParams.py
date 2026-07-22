@@ -39,8 +39,13 @@ H_ML_PURELY_DIFFUSIVE = 1.0e-6  # m
 # Sensitivity sweep of the fitted kappa/h_ml around each model's best fit.
 SENSITIVITY_KAPPA_FACTOR_RANGE = (0.2, 5.0)   # multiplicative range around kappa_pde
 SENSITIVITY_HML_FACTOR_RANGE = (0.25, 50.0)     # multiplicative range around h_ml_pde
+# The 2-D RMSE/t63 heatmaps use their OWN window: a tight zoom on the optimal
+# fit (factor 1.0 = kappa_pde/h_ml_pde) at much higher resolution than the 1-D
+# spaghetti sweeps, so the RMSE basin is finely resolved near its minimum.
+SENSITIVITY_KAPPA_FACTOR_RANGE_2D = (0.5, 2.0)  # zoomed multiplicative range, heatmaps only
+SENSITIVITY_HML_FACTOR_RANGE_2D = (0.5, 2.0)    # zoomed multiplicative range, heatmaps only
 SENSITIVITY_N_1D = 13                         # points in each 1-D spaghetti sweep
-SENSITIVITY_N_2D = 9                          # points per axis in the joint grid (N_2D^2 solves/model)
+SENSITIVITY_N_2D = 9                          # points/axis in the joint heatmap grid (N_2D^2 solves/model); --high-res raises to 41
 SENSITIVITY_KAPPA_BOUNDS = (1e-7, 1e-3)       # matches the curve_fit bounds below
 SENSITIVITY_HML_BOUNDS = (10.0, 2000.0)
 
@@ -73,6 +78,14 @@ PDE_FIT_N_SAVE = 250
 # clamped to [121, 401] points, so shrinking this refines the grid (up to the
 # clamp) to probe grid-resolution sensitivity of the fit.
 PDE_FIT_DZ_TARGET = 15.0
+
+# Time horizon [yr] for the diffusive fit curve on the OHU-vs-Ts ("ohc_ts")
+# diagnostic. The AOGCM scatter only spans the data window, but the green
+# "1-Box + Diffusion Fit" curve is integrated far past it -- out to this many
+# years -- so it traces the full approach to the (1, 1) equilibrium point rather
+# than stopping short. Evaluated on a 1-yr grid so the cumulative-OHC sum stays a
+# valid annual time integral.
+OHC_TS_EQUILIBRIUM_YEARS = 100000.0
 
 # Iterative heat-uptake-efficacy (epsilon) calibration, following Geoffroy
 # 2013b's fit_radiative_epsilon: alternately (1) regress the AOGCM's Net TOA
@@ -112,7 +125,7 @@ JOINT_FTOL = 1e-8
 JOINT_XTOL = 1e-8
 JOINT_FD_REL_STEP = 1e-6         # relative forward-difference step for the parallel Jacobian
 # Bounds, in theta order [log10(kappa), h_ml]. F_ref/lambda/eps/T_eq are fixed.
-JOINT_BOUNDS_LO = np.array([np.log10(1e-7),  10])
+JOINT_BOUNDS_LO = np.array([np.log10(1e-7),  100])
 JOINT_BOUNDS_HI = np.array([np.log10(1e-3), 300.0])
 JOINT_PARAM_NAMES = ["kappa", "h_ml"]
 # Diagnostic thresholds for the "is this parameter well optimized?" report.
@@ -135,7 +148,14 @@ _cli.add_argument(
    "--test", nargs="?", const="2", default=None,
    help="Quick test mode: run a subset of models. Bare --test = first 2; "
         "--test N = first N; --test M1,M2 = named models.")
-_TEST_SPEC = _cli.parse_known_args()[0].test
+_cli.add_argument(
+   "--high-res", action="store_true",
+   help="High-resolution 2-D RMSE/t63 heatmaps: SENSITIVITY_N_2D=41 (41x41 grid) "
+        "instead of the default 9 (9x9). Much slower (~21x the heatmap solves).")
+_cli_args = _cli.parse_known_args()[0]
+_TEST_SPEC = _cli_args.test
+if _cli_args.high_res:
+   SENSITIVITY_N_2D = 41
 
 def _apply_test_subset(models):
    """Return the model subset selected by --test (full list if flag absent)."""
@@ -1544,30 +1564,35 @@ for run_type in RUN_TYPES:
                pde_T_box = pde_dT_box(plot_t, h_ml_box) / T_eq
 
                # ----- OHC vs. T_s: AOGCM data vs. 1-Box + Diffusion fit -----
-               # Uses only the joint kappa_pde/h_ml_pde PDE fit (pde_T, the
-               # curve labeled "1-Box + Diffusion Fit" below) -- no 2-box
-               # model or mixed-layer-only reference lines. pde_T is only
-               # evaluated over plot_t (not extended to equilibrium), same as
-               # the AOGCM data it's compared against.
+               # Uses only the joint kappa_pde/h_ml_pde PDE fit (the curve labeled
+               # "1-Box + Diffusion Fit" below) -- no 2-box model or mixed-layer-only
+               # reference lines. Unlike the AOGCM data (which spans only its
+               # window), the fit curve is integrated out to OHC_TS_EQUILIBRIUM_YEARS
+               # so it traces the full approach to the (1, 1) equilibrium point.
                if results == 'unblinded':
-                  # Reference heat content = rho_cp * z_max * T_eq over the whole
-                  # ocean area, where z_max is the fit's ACTUAL grid depth (the
-                  # column that warms to T_eq at equilibrium). Computed from this
-                  # model's fitted kappa_pde with the same _pde_grid sizing the PDE
-                  # solve used, so normalized_OHC_pred/T_eq -> 1 at equilibrium
-                  # instead of z_max/2700.
-                  z_max, _ = _pde_grid(kappa_pde, t_final_years, PDE_FIT_DZ_TARGET)
-                  ohc_ref = 5.1e14 * 4.186e6 * z_max          # OHC_eq / T_eq  [J/K]
                   normalized_OHC = (5.1e14 * 31536000 * np.cumsum(nettoa)) / (1.37e21 * 3850)
 
-                  N_pde = F_ref - lmbda * (T_eq * pde_T) - (eps - 1.0) * H_plot
-                  normalized_OHC_pred = (5.1e14 * 31536000 * np.cumsum(N_pde)) / ohc_ref
+                  # Run the SAME fitted kappa_pde/h_ml_pde out to (near-)equilibrium
+                  # for the green fit curve. Evaluate on a 1-yr grid so cumsum(N)*
+                  # (seconds/yr) stays a valid time integral, and take z_max (hence
+                  # ohc_ref) from THIS deeper equilibrium solve so the whole column
+                  # warms to T_eq and normalized_OHC_pred/T_eq -> 1 at the end.
+                  eq_t = np.arange(1.0, OHC_TS_EQUILIBRIUM_YEARS + 1.0)
+                  pde_dT_func_eq = make_pde_dT(F_ref, T_eq, OHC_TS_EQUILIBRIUM_YEARS,
+                                               eps, dz_target_=PDE_FIT_DZ_TARGET)
+                  pde_T_eq = pde_dT_func_eq(eq_t, kappa_pde, h_ml_pde) / T_eq
+                  H_eq = pde_H_at(eq_t, kappa_pde, h_ml_pde, eps, F_ref, T_eq,
+                                  OHC_TS_EQUILIBRIUM_YEARS)
+                  z_max_eq, _ = _pde_grid(kappa_pde, OHC_TS_EQUILIBRIUM_YEARS, PDE_FIT_DZ_TARGET)
+                  ohc_ref_eq = 5.1e14 * 4.186e6 * z_max_eq    # OHC_eq / T_eq  [J/K]
+                  N_pde = F_ref - lmbda * (T_eq * pde_T_eq) - (eps - 1.0) * H_eq
+                  normalized_OHC_pred = (5.1e14 * 31536000 * np.cumsum(N_pde)) / ohc_ref_eq
 
                   cmap = plt.cm.turbo
                   norm = mpl.colors.Normalize(vmin=0, vmax=6000)
                   ax = ohc_ts_axs[expt][ohc_ts_idx[expt]]
                   sc = ax.scatter(t2m/T_eq, normalized_OHC/T_eq, c=np.arange(1, 1+normalized_OHC.shape[0], 1), cmap=cmap, norm=norm)
-                  ax.plot(pde_T, normalized_OHC_pred/T_eq, color='green', label='1-Box + Diffusion Fit')
+                  ax.plot(pde_T_eq, normalized_OHC_pred/T_eq, color='green', label='1-Box + Diffusion Fit')
                   ax.axvline(1.0, color="0.55", ls='--', lw=0.8)
                   format_ax(ax, text=f"{model}", xscale="linear", yscale="linear", ylim=(-0.05, 1.2))
                   ohc_ts_idx[expt] += 1
@@ -1632,8 +1657,14 @@ for run_type in RUN_TYPES:
                # of T_eq, and RMSE against the AOGCM fit data) are derived from
                # that single solve by interpolation. Cells are independent, so
                # solved in parallel and reshaped back into the grid afterward.
-               kappa_grid_2d = np.geomspace(kappa_lo, kappa_hi, SENSITIVITY_N_2D)
-               h_ml_grid_2d = np.linspace(h_ml_lo, h_ml_hi, SENSITIVITY_N_2D)
+               # Zoomed, high-resolution window for the 2-D heatmaps only (the 1-D
+               # spaghetti sweeps above keep the wide kappa_lo..hi / h_ml_lo..hi range).
+               kappa_lo_2d = max(SENSITIVITY_KAPPA_BOUNDS[0], kappa_pde * SENSITIVITY_KAPPA_FACTOR_RANGE_2D[0])
+               kappa_hi_2d = min(SENSITIVITY_KAPPA_BOUNDS[1], kappa_pde * SENSITIVITY_KAPPA_FACTOR_RANGE_2D[1])
+               h_ml_lo_2d = max(SENSITIVITY_HML_BOUNDS[0], h_ml_pde * SENSITIVITY_HML_FACTOR_RANGE_2D[0])
+               h_ml_hi_2d = min(SENSITIVITY_HML_BOUNDS[1], h_ml_pde * SENSITIVITY_HML_FACTOR_RANGE_2D[1])
+               kappa_grid_2d = np.geomspace(kappa_lo_2d, kappa_hi_2d, SENSITIVITY_N_2D)
+               h_ml_grid_2d = np.linspace(h_ml_lo_2d, h_ml_hi_2d, SENSITIVITY_N_2D)
                target_63 = (1.0 - np.exp(-1.0)) * T_eq
                t_grid_common = np.linspace(1.0, t_final_years, 400)
 

@@ -1621,6 +1621,7 @@ for run_type in [3, 1, 2]:
             grid=False,
             text_fontsize=20,
             tick_labelsize=16,
+            legend_fontsize=20,
          )
          # Show y-axis tick labels to a single decimal place.
          ax.yaxis.set_major_formatter(mpl.ticker.FormatStrFormatter("%.1f"))
@@ -1756,10 +1757,20 @@ for run_type in [3, 1, 2]:
             ax.set_xscale(scale)
             if scale == "linear":
                # Extend the left edge to -10 yr, keep the first tick at year 1,
-               # and end the ticks at the nearest 500-yr multiple below the run
-               # length (e.g. 4460 -> 4000), with 4 ticks per panel.
+               # and end the ticks at the nearest round multiple below the run
+               # length (e.g. 4460 -> 4000), with 4 ticks per panel. The rounding
+               # base scales with the run length so short (validation, ~150 yr)
+               # records still get sensible ticks instead of collapsing to 0.
                ax.set_xlim(-10, xmax + 1)
-               last_tick = np.floor(xmax / 500.0) * 500.0
+               if xmax >= 1000:
+                  base = 500.0
+               elif xmax >= 200:
+                  base = 100.0
+               else:
+                  base = 50.0
+               last_tick = np.floor(xmax / base) * base
+               if last_tick <= 1:
+                  last_tick = xmax
                ax.set_xticks(np.linspace(1, last_tick, 4))
             else:
                ax.set_xlim(1, xmax + 1)
