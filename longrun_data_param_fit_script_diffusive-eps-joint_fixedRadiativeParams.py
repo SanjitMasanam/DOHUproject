@@ -36,6 +36,21 @@ EXTRA_TEXT_FONTSIZE  = 12   # param boxes under the model tag (was 8)
 # numerically well-behaved mixed layer instead of exactly zero.
 H_ML_PURELY_DIFFUSIVE = 1.0e-6  # m
 
+# Ocean depth [m] for EVERY PDE solve in this script. This is a CLOSED domain:
+# a real physical floor at 2500 m carrying the solver's zero-flux (insulated)
+# bottom BC, so the ocean is a finite heat reservoir. It is deliberately a
+# constant and NOT sized from the diffusive penetration depth
+# 2*sqrt(kappa*t_final) -- the earlier
+#     z_max = min(4000, max(2500, 2*sqrt(kappa*t_final)))
+# made the domain depth a function of the fitted kappa and of the run length,
+# which (a) modeled an effectively semi-infinite ocean whenever kappa or
+# t_final was large, and (b) meant two solves at different kappa (as inside the
+# fit's Jacobian) or different horizons (the fit window vs the
+# OHC_TS_EQUILIBRIUM_YEARS run) were solving on different physical domains. With
+# a fixed depth, kappa now changes only how fast heat moves through the column,
+# never how much column there is.
+PDE_Z_MAX = 2500.0  # m
+
 # Sensitivity sweep of the fitted kappa/h_ml around each model's best fit.
 SENSITIVITY_KAPPA_FACTOR_RANGE = (0.2, 5.0)   # multiplicative range around kappa_pde
 SENSITIVITY_HML_FACTOR_RANGE = (0.25, 50.0)     # multiplicative range around h_ml_pde
@@ -74,9 +89,10 @@ SENSITIVITY_ATOL = 1e-8
 PDE_FIT_N_SAVE = 250
 
 # Target vertical grid spacing [m] for the main kappa_pde/h_ml_pde fit's PDE
-# solves (make_pde_dT below). Nz is derived from z_max/PDE_FIT_DZ_TARGET and
-# clamped to [121, 401] points, so shrinking this refines the grid (up to the
-# clamp) to probe grid-resolution sensitivity of the fit.
+# solves (make_pde_dT below). Nz = PDE_Z_MAX/PDE_FIT_DZ_TARGET + 1 (see
+# _pde_grid), so shrinking this refines the grid over the same fixed 2500 m
+# column to probe grid-resolution sensitivity of the fit. Default 15 m => 181
+# levels.
 PDE_FIT_DZ_TARGET = 15.0
 
 # Time horizon [yr] for the diffusive fit curve on the OHU-vs-Ts ("ohc_ts")
@@ -125,7 +141,7 @@ JOINT_FTOL = 1e-8
 JOINT_XTOL = 1e-8
 JOINT_FD_REL_STEP = 1e-6         # relative forward-difference step for the parallel Jacobian
 # Bounds, in theta order [log10(kappa), h_ml]. F_ref/lambda/eps/T_eq are fixed.
-JOINT_BOUNDS_LO = np.array([np.log10(1e-7),  100])
+JOINT_BOUNDS_LO = np.array([np.log10(1e-7),  1e-3])
 JOINT_BOUNDS_HI = np.array([np.log10(1e-3), 300.0])
 JOINT_PARAM_NAMES = ["kappa", "h_ml"]
 # Diagnostic thresholds for the "is this parameter well optimized?" report.
@@ -200,8 +216,7 @@ def _sensitivity_solve_dT(kappa, h_ml, F_ref, T_eq, t_final_years, t_eval, dz_ta
    epsilon is the fitted heat-uptake efficacy (1.0 = plain diffusive model),
    passed so the sweep curves and the "Best Fit" line share the same eps.
    """
-   z_max = min(4000.0, max(2700.0, 6.0 * np.sqrt(kappa * t_final_years * YEAR)))
-   nz = int(z_max / dz_target + 1)
+   z_max, nz = _pde_grid(dz_target)
    pde_p = PDEParams(
       kappa=kappa, h_ml=h_ml, dT_eq=T_eq, F0=F_ref, epsilon=epsilon,
       z_max=z_max, Nz=nz, t_final=t_final_years * YEAR,
@@ -213,12 +228,17 @@ def _sensitivity_solve_dT(kappa, h_ml, F_ref, T_eq, t_final_years, t_eval, dz_ta
    return np.interp(t_eval, sol["t"] / YEAR, sol["dT"])
 
 
-def _pde_grid(kappa, t_final_years, dz_target):
-   """Shared z_max/Nz sizing used by make_pde_dT and pde_H_at, so the surface
-   response and the heat-uptake diagnostic are read off the SAME grid."""
-   z_max = min(4000.0, max(2700.0, 6.0 * np.sqrt(kappa * t_final_years * YEAR)))
-   nz = int(z_max / dz_target + 1)
-   return z_max, nz
+def _pde_grid(dz_target):
+   """Shared z_max/Nz sizing for every PDE solve in this script, so the surface
+   response, the heat-uptake diagnostic and all sweep points are read off the
+   SAME grid.
+
+   The depth is always PDE_Z_MAX (a closed, insulated 2500 m floor) and never a
+   function of kappa or of the run length; only the requested vertical spacing
+   dz_target sets Nz. Nz is floored at 4 because the surface-gradient stencils
+   used downstream read theta[0..2]."""
+   nz = max(4, int(PDE_Z_MAX / dz_target + 1))
+   return PDE_Z_MAX, nz
 
 
 # Memoized full PDE solutions, keyed by every input that affects the solve.
@@ -241,7 +261,7 @@ def _cached_pde_solve(kappa, h_ml, eps_, F_ref_, T_eq_, t_final_yrs_,
    hit = _PDE_SOL_CACHE.get(key)
    if hit is not None:
       return hit
-   z_max, nz = _pde_grid(kappa, t_final_yrs_, dz_target_)
+   z_max, nz = _pde_grid(dz_target_)
    pde_p = PDEParams(
       kappa=kappa, h_ml=h_ml, dT_eq=T_eq_, F0=F_ref_, epsilon=eps_,
       z_max=z_max, Nz=nz, t_final=t_final_yrs_ * YEAR,
@@ -291,8 +311,7 @@ def _sensitivity_solve_H(kappa, h_ml, F_ref, T_eq, t_final_years, t_eval,
    heat-uptake flux instead of the temperature, read off the SAME 2nd-order
    one-sided stencil as pde_H_at. H > 0 when the surface is warmer than the water
    just below; the caller scales it by (eps-1) for the efficacy uptake term."""
-   z_max = min(4000.0, max(2700.0, 6.0 * np.sqrt(kappa * t_final_years * YEAR)))
-   nz = int(z_max / dz_target + 1)
+   z_max, nz = _pde_grid(dz_target)
    pde_p = PDEParams(
       kappa=kappa, h_ml=h_ml, dT_eq=T_eq, F0=F_ref, epsilon=epsilon,
       z_max=z_max, Nz=nz, t_final=t_final_years * YEAR,
@@ -325,7 +344,7 @@ def _joint_forward(theta, T_eq, eps, lam, fit_t, H_years, bin_H, t_final_years):
    log10_kappa, h_ml = theta
    kappa = 10.0 ** log10_kappa
    F0 = lam * T_eq
-   z_max, nz = _pde_grid(kappa, t_final_years, PDE_FIT_DZ_TARGET)
+   z_max, nz = _pde_grid(PDE_FIT_DZ_TARGET)
    pde_p = PDEParams(
       kappa=kappa, h_ml=h_ml, dT_eq=T_eq, F0=F0, epsilon=eps,
       z_max=z_max, Nz=nz, t_final=t_final_years * YEAR,
@@ -1530,7 +1549,7 @@ for run_type in RUN_TYPES:
                H_plot = pde_H_at(plot_t, kappa_pde, h_ml_pde, eps,
                                   F_ref, T_eq, t_final_years)
 
-               # Purely diffusive counterpart (h_ml -> 0, infinite ocean): uses
+               # Purely diffusive counterpart (h_ml -> 0): uses
                # D (the diffusivity implied by the analytic h_ml=0 fit above),
                # not kappa_pde, so this curve is directly comparable to
                # "Diffusive Analytical" -- kappa_pde comes from the joint
@@ -1540,10 +1559,17 @@ for run_type in RUN_TYPES:
                # mixed-layer heat capacity is taken to ~0 so the surface
                # responds essentially instantaneously to the flux balance at
                # the top of the thermocline, and the domain is auto-deepened
-               # (semi_infinite) so the deep ocean keeps absorbing heat
-               # instead of hitting an insulated floor.
+               # (semi_infinite=True) so the deep ocean keeps absorbing heat
+               # instead of hitting an insulated floor. This is the ONE solve
+               # in the script that is deliberately NOT on the closed PDE_Z_MAX
+               # column: it's the h_ml->0 semi-infinite analytic limit this
+               # curve exists to be compared against, so the infinite domain is
+               # the point. z_max/Nz below only seed the vertical RESOLUTION
+               # (dz = PDE_FIT_DZ_TARGET, matching every other solve); the
+               # semi_infinite pass then deepens z_max from there.
                pde_p_h0 = PDEParams(kappa=D, h_ml=H_ML_PURELY_DIFFUSIVE,
                                      dT_eq=T_eq, F0=F_ref, t_final=t_final_years * YEAR,
+                                     z_max=PDE_Z_MAX, Nz=_pde_grid(PDE_FIT_DZ_TARGET)[1],
                                      semi_infinite=True)
                sol_h0 = pde_solve_model(pde_p_h0, n_save=250)
                pde_T_h0 = np.interp(plot_t, sol_h0["t"] / YEAR, sol_h0["dT"]) / T_eq
@@ -1574,19 +1600,22 @@ for run_type in RUN_TYPES:
 
                   # Run the SAME fitted kappa_pde/h_ml_pde out to (near-)equilibrium
                   # for the green fit curve. Evaluate on a 1-yr grid so cumsum(N)*
-                  # (seconds/yr) stays a valid time integral, and take z_max (hence
-                  # ohc_ref) from THIS deeper equilibrium solve so the whole column
-                  # warms to T_eq and normalized_OHC_pred/T_eq -> 1 at the end.
+                  # (seconds/yr) stays a valid time integral. The domain is the same
+                  # closed PDE_Z_MAX column as every other solve (the equilibrium run
+                  # is no longer deepened), so given this horizon the whole finite
+                  # column warms to T_eq and normalized_OHC_pred/T_eq -> 1 at the end.
                   eq_t = np.arange(1.0, OHC_TS_EQUILIBRIUM_YEARS + 1.0)
                   pde_dT_func_eq = make_pde_dT(F_ref, T_eq, OHC_TS_EQUILIBRIUM_YEARS,
                                                eps, dz_target_=PDE_FIT_DZ_TARGET)
                   pde_T_eq = pde_dT_func_eq(eq_t, kappa_pde, h_ml_pde) / T_eq
                   H_eq = pde_H_at(eq_t, kappa_pde, h_ml_pde, eps, F_ref, T_eq,
                                   OHC_TS_EQUILIBRIUM_YEARS)
-                  z_max_eq, _ = _pde_grid(kappa_pde, OHC_TS_EQUILIBRIUM_YEARS, PDE_FIT_DZ_TARGET)
-                  ohc_ref_eq = 5.1e14 * 4.186e6 * z_max_eq    # OHC_eq / T_eq  [J/K]
+                  z_max_eq, _ = _pde_grid(PDE_FIT_DZ_TARGET)
+                  ohc_ref_eq = 1    # OHC_eq / T_eq  [J/K]
                   N_pde = F_ref - lmbda * (T_eq * pde_T_eq) - (eps - 1.0) * H_eq
                   normalized_OHC_pred = (5.1e14 * 31536000 * np.cumsum(N_pde)) / ohc_ref_eq
+
+                  print(f"{model} OHC_eq diff-eps / reference:", ohc_ref_eq / (1.37e21 * 3850))
 
                   cmap = plt.cm.turbo
                   norm = mpl.colors.Normalize(vmin=0, vmax=6000)

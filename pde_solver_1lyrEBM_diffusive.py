@@ -26,13 +26,18 @@ the slab ODE couples to the interior PDE.
                                                  (d(theta)/dz < 0) must LOSE heat
                                                  downward]
 
-    Bottom, z = z_max: insulated (zero flux). z_max is chosen large enough
-    that the domain is effectively semi-infinite over the runs (checked below).
-    Setting Params.semi_infinite = True makes this rigorous: solve_model then
-    auto-deepens z_max (and Nz) to many diffusive penetration depths below the
-    surface, so the insulated wall is never reached and the ocean behaves as an
-    "effectively infinite" heat reservoir. (Equivalently, one may pass a large
-    z_max by hand.)
+    Bottom, z = z_max: insulated (zero flux). By DEFAULT the domain is CLOSED
+    at z_max = 2500 m: that floor is a real physical edge, not an approximation
+    to a semi-infinite ocean. The ocean is then a finite heat reservoir, so on
+    long enough runs the diffusive front reaches the floor, the whole column
+    warms, and the surface equilibrates to dT_eq.
+
+    Setting Params.semi_infinite = True is an OPT-IN escape hatch that recovers
+    the old "effectively infinite ocean" behavior: solve_model auto-deepens
+    z_max (and Nz) to many diffusive penetration depths below the surface, so
+    the insulated wall is never reached. It is off by default and used only for
+    the finite-vs-infinite comparison below. (Equivalently, one may pass a
+    large z_max by hand.)
 
 Hansen Eq. 24 writes the surface forcing as
     F = F0 / dT_eq * (dT_eq - T_0)  =  F0 - (F0/dT_eq) * T_0,
@@ -146,11 +151,13 @@ class Params:
                                        # the unscaled diffusive flux H. 1.0 = off
                                        # (recovers the plain diffusive model).
     rho_cp: float = 4.186e6            # vol. heat capacity of seawater [J m^-3 K^-1]
-    z_max: float = 2700.0              # domain depth [m]; >> diffusive penetration
+    z_max: float = 2500.0              # ocean depth [m]; a CLOSED, physical floor
+                                       # with zero-flux BC (finite heat reservoir)
     Nz: int = 241                      # grid points => dz = 11.25 m
     t_final: float = 35.0 * YEAR       # Fig. 16 window; overridden for long runs
-    semi_infinite: bool = False        # if True, solve_model auto-deepens z_max/Nz
-                                       # so the insulated bottom is never reached
+    semi_infinite: bool = False        # OPT-IN escape hatch (default off): if True,
+                                       # solve_model auto-deepens z_max/Nz so the
+                                       # insulated bottom is never reached
                                        # ("effectively infinite ocean" limit)
 
     # ---- derived quantities (comments give units) ----
@@ -571,22 +578,24 @@ def main():
     savefig(fig, "depth_profiles.png")
 
     # -----------------------------------------------------------------
-    # FIGURE + CHECK: finite vs effectively-infinite ocean (k = 1, 110 m).
-    # The default z_max = 2700 m has an INSULATED bottom, so once the
-    # diffusive front reaches it (~577 yr here) heat can no longer drain
-    # downward and the capped column saturates toward dT_eq FASTER than a
-    # truly deep ocean would. semi_infinite=True auto-deepens the domain so
-    # the bottom is never felt: the deep ocean keeps absorbing heat and the
-    # surface lags. The two must be indistinguishable early and diverge late.
+    # FIGURE + CHECK: the model's closed ocean vs the old effectively-infinite
+    # limit (k = 1, 110 m). The DEFAULT model is the closed column: z_max =
+    # 2500 m with an insulated floor, so once the diffusive front reaches it
+    # (~577 yr here) heat can no longer drain downward, the whole column warms
+    # and the surface equilibrates to dT_eq. semi_infinite=True is the opt-in
+    # escape hatch that auto-deepens the domain so the floor is never felt:
+    # the deep ocean keeps absorbing heat and the surface lags indefinitely.
+    # The two must be indistinguishable early and diverge late -- this figure
+    # is what quantifies how much the 2500 m floor actually matters.
     # -----------------------------------------------------------------
-    section("FIGURE: finite_vs_infinite.png  +  CHECK: finite/infinite ocean (3000-yr)")
+    section("FIGURE: finite_vs_infinite.png  +  CHECK: closed vs infinite ocean (3000-yr)")
     T_LONG = 3000.0 * YEAR
-    finite = solve_model(replace(p, t_final=T_LONG))                     # z_max=2700, insulated
-    infinite = solve_model(replace(p, t_final=T_LONG, semi_infinite=True))  # auto-deep
+    finite = solve_model(replace(p, t_final=T_LONG))                     # default: closed at 2500 m
+    infinite = solve_model(replace(p, t_final=T_LONG, semi_infinite=True))  # opt-in auto-deep
     print(f"  finite: z_max = {finite['p'].z_max:.0f} m, Nz = {finite['p'].Nz}")
     print(f"  infinite: z_max = {infinite['p'].z_max:.0f} m, Nz = {infinite['p'].Nz}")
 
-    # Early-time agreement: before the front reaches 2700 m the insulated wall
+    # Early-time agreement: before the front reaches 2500 m the insulated wall
     # is irrelevant, so the two surface series must coincide. (t_eval grids are
     # identical since only z_max/Nz differ, so compare pointwise.)
     t_yr_fi = finite["t"] / YEAR
@@ -601,6 +610,21 @@ def main():
           dfin > dinf and dfin <= p.dT_eq * (1 + 1e-9)
           and dinf <= p.dT_eq * (1 + 1e-9),
           "finite (insulated) saturates faster; both bounded by dT_eq")
+
+    # The defining consequence of a closed domain: run it long enough and the
+    # 2500 m ocean must reach a UNIFORM anomaly equal to dT_eq -- no residual
+    # gradient, since there is nowhere left for heat to drain to. A
+    # semi-infinite ocean never does this. The horizon is set by the time to
+    # diffusively homogenize the column, z_max^2/kappa ~ 2300 yr (NOT the
+    # column's radiative time rho_cp*z_max/lam ~ 350 yr), so 3000 yr is still
+    # visibly stratified (~0.4 C top-to-bottom) and this needs its own run.
+    T_EQUIL = 20000.0 * YEAR
+    prof_end = solve_model(replace(p, t_final=T_EQUIL), n_save=50)["theta"][:, -1]
+    spread = np.ptp(prof_end)
+    check(f"{T_EQUIL / YEAR:.0f}-yr profile is uniform at dT_eq: spread = {spread:.2e} C, "
+          f"mean = {prof_end.mean():.4f} C vs dT_eq = {p.dT_eq} C",
+          spread < 1e-3 and abs(prof_end.mean() - p.dT_eq) < 1e-3,
+          "closed column equilibrates through its full depth")
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
     ax.plot(t_yr_fi, finite["dT"], color=C_VERM, lw=2,
@@ -664,38 +688,43 @@ def main():
     savefig(fig, "energy_budget.png")
 
     # -----------------------------------------------------------------
-    # CHECK 10: bottom boundary condition. On the most demanding run
-    # (150 yr), the one-sided gradient at z_max should be ~0 (Neumann)
-    # and the bottom anomaly itself ~0 (domain effectively semi-infinite).
+    # CHECK 10: bottom boundary condition. The floor at z_max is a CLOSED,
+    # zero-flux (Neumann) edge, so the one-sided gradient there must be ~0
+    # on the most demanding run (150 yr). That is the only requirement --
+    # the bottom anomaly itself is NOT required to vanish, since the domain
+    # is a finite reservoir rather than an approximation to a semi-infinite
+    # ocean; how far the front has penetrated by 150 yr is reported below as
+    # a diagnostic only.
     # -----------------------------------------------------------------
-    section("CHECK 10: bottom BC + semi-infinite domain")
+    section("CHECK 10: bottom BC (closed, zero-flux floor at z_max)")
     uf = long_run["theta"][:, -1]
     dzl = long_run["dz"]
     grad_bot = (3 * uf[-1] - 4 * uf[-2] + uf[-3]) / (2 * dzl)   # 2nd-order one-sided
     grad_scale = np.ptp(uf) / p.z_max                            # typical gradient
     check(f"d(theta)/dz at z_max = {grad_bot:.2e} K/m", abs(grad_bot) < 1e-3 * grad_scale,
           "relative to column-mean gradient")
-    # Semi-infinite diffusion theory predicts the anomaly reaching depth z
-    # scales like erfc(z / (2*sqrt(kappa*t))) of the surface value -- about
-    # 0.5% of the surface anomaly at z_max after 150 yr. So a tiny nonzero
-    # bottom value is EXPECTED; the physical requirement is only that it be
-    # a negligible fraction of the surface anomaly (the domain-halving test
-    # below is the decisive proof the wall doesn't affect the answer).
+    # Diagnostic (not a pass/fail): how deep has the front reached at 150 yr?
+    # Free diffusion into a semi-infinite half-space would leave
+    # erfc(z / (2*sqrt(kappa*t))) of the surface anomaly at depth z, which is
+    # what the closed column still tracks closely while the floor is far from
+    # being felt. Once the two part company, the finite depth is doing real work.
     from scipy.special import erfc
     frac = uf[-1] / uf[0]
     theory = erfc(p.z_max / (2.0 * np.sqrt(p.kappa * 150 * YEAR)))
-    check(f"bottom anomaly after 150 yr = {uf[-1]:.2e} C = {100 * frac:.2f}% of surface",
-          abs(frac) < 0.01,
-          f"tol 1%; semi-infinite theory predicts ~erfc = {100 * theory:.2f}%")
+    print(f"  bottom anomaly after 150 yr = {uf[-1]:.2e} C = {100 * frac:.2f}% of "
+          f"surface (free-diffusion erfc reference: {100 * theory:.2f}%)")
 
-    # Halve the domain: if z_max is truly 'effectively infinite', the
-    # 35-yr surface answer must not care. (Nz chosen to keep dz identical
-    # so this isolates the domain-size effect from resolution.)
-    r_half = solve_model(replace(p, z_max=1350.0, Nz=121))
+    # The floor is physical, so halving the ocean depth is a DIFFERENT model,
+    # not a convergence test -- a 1350 m ocean holds half the heat and must
+    # warm the surface at least as fast. Early on (35 yr) neither floor has
+    # been felt, so the two still agree; the point of the check is the
+    # inequality, which holds at all times.
     d35_full = runs["110 m + k = 1 cm$^2$/s"]["dT"][-1]
+    r_half = solve_model(replace(p, z_max=1350.0, Nz=121))
     d35_half = r_half["dT"][-1]
-    check(f"dT(35 yr): z_max 2700 m -> {d35_full:.4f}, 1350 m -> {d35_half:.4f}",
-          abs(d35_full - d35_half) / d35_full < 1e-3, "tol 0.1%")
+    check(f"dT(35 yr): z_max 2500 m -> {d35_full:.4f}, 1350 m -> {d35_half:.4f}",
+          d35_half >= d35_full * (1 - 1e-9),
+          "shallower closed ocean warms at least as fast (equal before the floor is felt)")
 
     # -----------------------------------------------------------------
     # CHECK 11: grid-refinement convergence. Doubling resolution should

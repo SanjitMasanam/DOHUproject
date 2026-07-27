@@ -103,7 +103,7 @@ REPLICATE_LATE_YEAR_END = 150
 EARLY_YEAR_START = 1
 EARLY_YEAR_END = 10
 
-for run_type in [3, 1, 2]:
+for run_type in [1, 2, 3]:
    for results in ["unblinded", "validation"]:
       dir_list = [
          "geoffroy_replicate_results",
@@ -869,10 +869,17 @@ for run_type in [3, 1, 2]:
 
 
       def plot_slow_fit(ax, slow, model, iteration):
-         ax.scatter(slow["x"], slow["y"], s=5, alpha=0.25, color="red",
+         ax.scatter(slow["x"], slow["y"], s=22, alpha=0.6, color="red",
                     edgecolors="none", label="AOGCM")
          ax.plot(slow["x"], slow["yfit"], linewidth=3, color="blue", zorder=5,
                  label=rf"$\tau_s$={slow['tau_s']:.3g}, $a_s$={slow['a_s']:.3g}")
+         ax.axvline(150, color="orange", linestyle="--", linewidth=2.5, alpha=0.7)
+         # "Year 150" label written vertically just to the RIGHT of the line
+         # (offset in points so it never overlaps the line).
+         ax.annotate("Year 150", xy=(150, 0.25), xycoords=ax.get_xaxis_transform(),
+                     xytext=(2, 0), textcoords="offset points",
+                     rotation=270, va="top", ha="left", fontweight="bold",
+                     fontsize=EXTRA_TEXT_FONTSIZE, color="orange")
          format_ax(ax, text=model, xscale="linear", yscale="linear", legend_loc='lower left',
                    grid=False, text_fontsize=20, text_x=0.98, text_ha='right', tick_labelsize=16)
 
@@ -1718,6 +1725,8 @@ for run_type in [3, 1, 2]:
             ohc_ref = 5.1e14 * (C + C0) * 31536000       # OHC_eq / T_eq  [J/K]
             normalized_OHC_pred = (5.1e14 * 31536000 * np.cumsum(N_long)) / ohc_ref
             normalized_OHC = (5.1e14 * 31536000 * np.cumsum(N_obs)) / (1.37e21 * 3850)
+
+            print(f"Normalized OHC: {normalized_OHC[-1]}, Reference: {ohc_ref / (1.37e21 * 3850)}")
 
             ax = ohct_axs[imodel]
             cmap = plt.cm.turbo
