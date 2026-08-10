@@ -38,109 +38,28 @@ def _apply_test_subset(models):
                        f"valid: {models}")
    return [m for m in models if m in names]   # preserve original order
 
-# Font used for every label/tick/legend on every plot in this script -- change
-# this one value to switch fonts everywhere (falls back to matplotlib's
-# default sans font if the named font isn't installed on this machine).
-PLOT_FONT_FAMILY = "Verdana"
-mpl.rcParams["font.family"] = PLOT_FONT_FAMILY
+from figure_paths import STEP1, STEP2, VALIDATION, RunLayout, figname
+# Importing plot_style applies the shared rcParams; the *_FONTSIZE constants are
+# re-exported here because this script's own plotting code still references them.
+from plot_style import (
+   AXIS_LABEL_FONTSIZE,
+   EXTRA_TEXT_FONTSIZE,
+   MODEL_LABEL_FONTSIZE,
+   PANEL_AXIS_FONTSIZE,
+   format_ax,
+   make_model_grid,
+)
 
-# --- shared plot-styling sizes (keep identical across all longrun scripts) ---
-AXIS_LABEL_FONTSIZE  = 22   # figure-level x/y axis + side labels (was 18)
-PANEL_AXIS_FONTSIZE  = 13   # small per-panel axis labels: 3D x/y/z, format_ax (was 9/default)
-MODEL_LABEL_FONTSIZE = 15   # bold top-left model tag
-EXTRA_TEXT_FONTSIZE  = 12   # param boxes under the model tag (was 8)
-# NOTE: plot titles are intentionally left at their current sizes.
-
-def format_ax(ax, title="", xlabel="", ylabel="", text="",
-            xscale="linear", yscale="linear",
-            xlim=None, ylim=None,
-            xticks=None, yticks=None,
-            xspacing=True, yspacing=True,
-            legend=True, legend_loc='upper right', grid=True):
-
-   ax.set(xscale=xscale, yscale=yscale, xlim=xlim, ylim=ylim)
-   if title:  ax.set_title(title, fontweight="bold")
-   if xlabel: ax.set_xlabel(xlabel, fontweight="bold", fontsize=PANEL_AXIS_FONTSIZE)
-   if ylabel: ax.set_ylabel(ylabel, fontweight="bold", fontsize=PANEL_AXIS_FONTSIZE)
-
-   if text:
-      ax.text(0.02, 0.98, text, transform=ax.transAxes, weight='bold',
-               fontsize=MODEL_LABEL_FONTSIZE, va="top", ha="left",
-               bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4))
-
-   if xticks is not None: ax.set_xticks(xticks)
-   if yticks is not None: ax.set_yticks(yticks)
-   # if xspacing: ax.xaxis.set_major_locator(MultipleLocator(xspacing))
-   # if yspacing: ax.yaxis.set_minor_locator(MultipleLocator(yspacing))
-
-   ax.tick_params(labelsize=14, width=2, length=8, direction="in")
-   if grid: ax.grid(alpha=0.3)
-   if legend: ax.legend(loc=legend_loc, prop={'weight': 'bold', 'size': 12})
-
-def make_model_grid(
-   models,
-   width_per_ax=6,
-   height_per_ax=6,
-   dpi=None,
-   title=None,
-   xlabel=None,
-   ylabel=None,
-   ncols=4,
-   nrows=2,
-   right=0.98,
-   wspace=0.12,
-   hspace=0.18,
-   sharex=False,
-   sharey=False,
-):
-   nmodels = len(models)
-   if nmodels % 2 != 0:
-      raise ValueError(f"Expected an even number of models, got {nmodels}.")
-
-   ncols, nrows = 4, 2
-
-   fig, axs = plt.subplots(
-      nrows,
-      ncols,
-      figsize=(width_per_ax * ncols, height_per_ax * nrows),
-      dpi=dpi,
-      sharex=sharex,
-      sharey=sharey,
-      constrained_layout=False,
-   )
-
-   fig.subplots_adjust(left=0.05, right=right, bottom=0.075, top=0.95, wspace=wspace, hspace=hspace)
-
-   if title:
-      fig.suptitle(title, fontsize=20, fontweight="bold")
-
-   if xlabel:
-      fig.text(0.5, 0.02, xlabel, ha='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold")
-
-   if ylabel:
-      fig.text(0.02, 0.5, ylabel, ha='center', va='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold", rotation=90.)
-
-   return fig, np.asarray(axs).ravel()
-
+VARIANT = "2013a"
 
 for run_type in [3, 2, 1]:
    for results in ["unblinded", "validation"]:
-      dir_list = [
-         "geoffroy_replicate_results",
-         "50-yr_avg_forcing_results",
-         "50-yr_avg_tau_s_LR_fit_results",
-      ]
-      current_dir = dir_list[run_type - 1]
+      # Output destination for this (run_type, results) pass. Directories are
+      # created by the writes themselves, so none is made that stays empty.
+      layout = RunLayout(VARIANT, run_type, results)
       print("==================================")
-      print(f"Current Dir: {current_dir}\nType of output: {results}")
+      print(f"Output: {layout.label}")
       print("==================================")
-
-      extra_text = {
-         1: "",
-         2: "50yrAvg",
-         3: "50yrAvg_LRparamFit",
-      }[run_type]
-      suffix = f"_{extra_text}" if extra_text else ""
 
       def sympy_prop_unc(expr, values, uncertainties):
          """
@@ -154,10 +73,6 @@ for run_type in [3, 2, 1]:
             deriv_val = float(deriv.evalf(subs=values))
             variance += (deriv_val * unc) ** 2
          return float(np.sqrt(variance))
-
-      def ensure_dirs(outdir, current_dir, sections):
-         for section in sections:
-            (outdir / current_dir / section / "png").mkdir(parents=True, exist_ok=True)
 
       # Create dataframe to store model parameters
       param_cols = [
@@ -200,11 +115,6 @@ for run_type in [3, 2, 1]:
                f"{fit_models} ***")
       expts = list(ro.globalenv["expts"])
       df["model"] = fit_models
-
-      # Make output directory if needed
-      outdir = Path("./figures_2013a")
-      outdir.mkdir(exist_ok=True)
-      ensure_dirs(outdir, current_dir, ["step1", "step2", "validation", "unblinded"])
 
       tcr = {
           "CCSM3": 1.7,      # no direct CMIP6 equivalent
@@ -370,11 +280,8 @@ for run_type in [3, 2, 1]:
 
       # Save the combined Step 1 and Net TOA timeseries figures
       for expt in ["4xCO2"]:
-         step1_figs[expt].savefig(
-            outdir / current_dir / "step1" / "png" / f"{expt}_all_models_T2M_vs_NETTOA{suffix}.png",
-            dpi=200,
-            bbox_inches="tight",
-         )
+         layout.save(step1_figs[expt], STEP1,
+                     figname(expt, "all_models", "T2M_vs_NETTOA"))
          plt.close(step1_figs[expt])
 
       print("Finished Step 1: saved combined Step 1 figures & params to df")
@@ -582,11 +489,8 @@ for run_type in [3, 2, 1]:
 
       # Write the combined Step 2 figures to disk
       for expt in ["4xCO2"]:
-         step2_figs[expt].savefig(
-            outdir / current_dir / "step2" / "png" / f"{expt}_all_models_log_Teq_minus_T_vs_t{suffix}.png",
-            dpi=200,
-            bbox_inches="tight",
-         )
+         layout.save(step2_figs[expt], STEP2,
+                     figname(expt, "all_models", "log_Teq_minus_T_vs_t"))
          plt.close(step2_figs[expt])
 
          # Explicitly span every panel to the full extent of all plotted data
@@ -603,17 +507,14 @@ for run_type in [3, 2, 1]:
                ax.xaxis.set_major_locator(mpl.ticker.MaxNLocator(nbins=10))
                ax.yaxis.set_major_locator(mpl.ticker.MaxNLocator(nbins=10))
 
-         tau_s_figs[expt].savefig(
-            outdir / current_dir / "step2" / "png" / f"{expt}_all_models_tau_s_vs_calibration_t{suffix}.png",
-            dpi=200,
-            bbox_inches="tight",
-         )
+         layout.save(tau_s_figs[expt], STEP2,
+                     figname(expt, "all_models", "tau_s_vs_calibration_t"))
          plt.close(tau_s_figs[expt])
 
       print("Finished Step 2: saved combined Step 2 figures and all parameters to df")
 
       # Save fitted model parameter table to CSV
-      df.to_csv(outdir / current_dir / "fitted_model_params.csv", index=False)
+      df.to_csv(layout.csv_path("fitted_model_params"), index=False)
 
       # ---------------- Compare fitted parameters against published paper values ----------------
       model_paperParams = {
@@ -728,11 +629,8 @@ for run_type in [3, 2, 1]:
          format_ax(ax, text=f"{var}", xlabel=r"$\mu_{\rm SN}$", xscale="linear", yscale="linear", legend=False)
          ax.legend(handles=handles, loc='lower left', prop={'weight': 'bold', 'size': 10})
 
-      fig_val.savefig(
-         outdir / current_dir / "validation" / "png" / f"all_validation_params_GF_vs_SN{suffix}.png",
-         dpi=200,
-         bbox_inches="tight",
-      )
+      layout.save(fig_val, VALIDATION,
+                  figname("all_models", "validation_params_GF_vs_SN"))
       plt.close(fig_val)
 
       # ----------------- Plot final results ---------------------
@@ -923,38 +821,25 @@ for run_type in [3, 2, 1]:
                ax.set_xscale(scale)
                ax.set_xlim(1, xmax + 1)
 
-            final_figs[expt].savefig(
-               outdir / current_dir / results / "png" / f"{expt}_all_models_T2m_vs_t_{results}_{scale}{suffix}.png",
-               dpi=200,
-               bbox_inches="tight",
-            )
+            layout.save_results(final_figs[expt],
+                                figname(expt, "all_models", "T2m_vs_t", scale))
 
-            nettoa_figs[expt].savefig(
-               outdir / current_dir / results / "png" / f"{expt}_all_models_NETTOA_timeseries_{scale}{suffix}.png",
-               dpi=200,
-               bbox_inches="tight",
-            )
+            layout.save_results(nettoa_figs[expt],
+                                figname(expt, "all_models", "NETTOA_timeseries", scale))
 
          plt.close(final_figs[expt])
          plt.close(nettoa_figs[expt])
 
          if results == 'unblinded':
-            assmpt_figs[expt].savefig(
-               outdir / current_dir / results / "png" / f"{expt}_all_models_cdTdt_t_{results}{suffix}.png",
-               dpi=200,
-               bbox_inches="tight",
-            )
+            layout.save_results(assmpt_figs[expt],
+                                figname(expt, "all_models", "cdTdt_t"))
             plt.close(assmpt_figs[expt])
 
             # Saved in step 1
             cbar = ohc_ts_figs[expt].colorbar(sc, ax=ohc_ts_axs[expt].ravel().tolist(), fraction=0.025, pad=0.025)
             cbar.set_label("Year")
 
-            ohc_ts_figs[expt].savefig(
-               outdir / current_dir / results / "png" / f"{expt}_all_models_ohc_ts{suffix}.png",
-               dpi=200,
-               bbox_inches="tight",
-            )
+            layout.save_results(ohc_ts_figs[expt], figname(expt, "all_models", "ohc_ts"))
             plt.close(ohc_ts_figs[expt])
 
       print("Finished final val/result plots")

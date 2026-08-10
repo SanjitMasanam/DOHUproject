@@ -31,7 +31,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib as mpl
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers the '3d' projection)
 import rpy2.robjects as ro
 import sympy as sp
 from matplotlib.lines import Line2D
@@ -65,18 +64,24 @@ def _apply_test_subset(models):
 
 # ------------------------- User settings -------------------------
 
-# Font used for every label/tick/legend on every plot in this script -- change
-# this one value to switch fonts everywhere (falls back to matplotlib's
-# default sans font if the named font isn't installed on this machine).
-PLOT_FONT_FAMILY = "Verdana"
-mpl.rcParams["font.family"] = PLOT_FONT_FAMILY
+from figure_paths import (
+   BUDGET, DPI_WIDE, STEP1, STEP2, VALIDATION, RunLayout, figname,
+)
+# Importing plot_style applies the shared rcParams; the *_FONTSIZE constants are
+# re-exported here because this script's own plotting code still references them.
+from plot_style import (
+   AXIS_LABEL_FONTSIZE,
+   EXTRA_TEXT_FONTSIZE,
+   MODEL_LABEL_FONTSIZE,
+   PANEL_AXIS_FONTSIZE,
+   format_ax,
+   make_model_grid,
+   make_model_grid_3d,
+   make_model_grid_with_ratio,
+   plot_regression_3d,
+)
 
-# --- shared plot-styling sizes (keep identical across all longrun scripts) ---
-AXIS_LABEL_FONTSIZE  = 22   # figure-level x/y axis + side labels (was 18)
-PANEL_AXIS_FONTSIZE  = 13   # small per-panel axis labels: 3D x/y/z, format_ax (was 9/default)
-MODEL_LABEL_FONTSIZE = 15   # bold top-left model tag
-EXTRA_TEXT_FONTSIZE  = 12   # param boxes under the model tag (was 8)
-# NOTE: plot titles are intentionally left at their current sizes.
+VARIANT = "2013b"
 
 # Use at least 3 iterations to match your original script, but allow convergence.
 MIN_ITERATIONS = 3
@@ -105,23 +110,12 @@ EARLY_YEAR_END = 10
 
 for run_type in [1, 2, 3]:
    for results in ["unblinded", "validation"]:
-      dir_list = [
-         "geoffroy_replicate_results",
-         "50-yr_avg_forcing_results",
-         "50-yr_avg_tau_s_LR_fit_results",
-      ]
-      current_dir = dir_list[run_type - 1]
-
+      # Output destination for this (run_type, results) pass. Directories are
+      # created by the writes themselves, so none is made that stays empty.
+      layout = RunLayout(VARIANT, run_type, results)
       print("==================================")
-      print(f"Current Dir: {current_dir}\nType of output: {results}")
+      print(f"Output: {layout.label}")
       print("==================================")
-
-      extra_text = {
-         1: "",
-         2: "50yrAvg",
-         3: "50yrAvg_LRparamFit",
-      }[run_type]
-      run_type_suffix = f"_{extra_text}" if extra_text else ""
 
 
       # ------------------------- Data structures -------------------------
@@ -182,196 +176,6 @@ for run_type in [1, 2, 3]:
             deriv_val = float(deriv.evalf(subs=values))
             variance += (deriv_val * float(unc)) ** 2
          return float(np.sqrt(max(variance, 0.0)))
-
-
-      def format_ax(ax, title="", xlabel="", ylabel="", text="",
-                  xscale="linear", yscale="linear",
-                  xlim=None, ylim=None,
-                  xticks=None, yticks=None,
-                  xspacing=True, yspacing=True,
-                  legend=True, legend_loc='upper right', grid=True,
-                  text_fontsize=None, text_x=0.02, text_ha='left',
-                  tick_labelsize=14, legend_fontsize=12):
-
-         ax.set(xscale=xscale, yscale=yscale, xlim=xlim, ylim=ylim)
-         if title:  ax.set_title(title, fontweight="bold")
-         if xlabel: ax.set_xlabel(xlabel, fontweight="bold", fontsize=PANEL_AXIS_FONTSIZE)
-         if ylabel: ax.set_ylabel(ylabel, fontweight="bold", fontsize=PANEL_AXIS_FONTSIZE)
-
-         if text:
-            ax.text(text_x, 0.98, text, transform=ax.transAxes, weight='bold',
-                     fontsize=(text_fontsize if text_fontsize is not None else MODEL_LABEL_FONTSIZE),
-                     va="top", ha=text_ha,
-                     bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4))
-
-         if xticks is not None: ax.set_xticks(xticks)
-         if yticks is not None: ax.set_yticks(yticks)
-
-         ax.tick_params(labelsize=tick_labelsize, width=2, length=8, direction="in")
-         if grid: ax.grid(alpha=0.3)
-         if legend: ax.legend(loc=legend_loc, prop={'weight': 'bold', 'size': legend_fontsize})
-
-      def make_model_grid(
-         models,
-         width_per_ax=6,
-         height_per_ax=6,
-         dpi=None,
-         title=None,
-         xlabel=None,
-         ylabel=None,
-         ncols=4,
-         nrows=2,
-         right=0.98,
-         wspace=0.12,
-         hspace=0.18,
-         sharex=False,
-         sharey=False,
-      ):
-         nmodels = len(models)
-         if nmodels % 2 != 0:
-            raise ValueError(f"Expected an even number of models, got {nmodels}.")
-
-         ncols, nrows = 4, 2
-
-         fig, axs = plt.subplots(
-            nrows,
-            ncols,
-            figsize=(width_per_ax * ncols, height_per_ax * nrows),
-            dpi=dpi,
-            sharex=sharex,
-            sharey=sharey,
-            constrained_layout=False,
-         )
-
-         fig.subplots_adjust(left=0.05, right=right, bottom=0.075, top=0.95, wspace=wspace, hspace=hspace)
-
-         if title:
-            fig.suptitle(title, fontsize=20, fontweight="bold")
-
-         if xlabel:
-            fig.text(0.5, 0.02, xlabel, ha='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold")
-
-         if ylabel:
-            fig.text(0.02, 0.5, ylabel, ha='center', va='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold", rotation=90.)
-
-         return fig, np.asarray(axs).ravel()
-
-
-      def make_model_grid_with_ratio(
-         models,
-         width_per_ax=6,
-         height_per_ax=6,
-         ratio_height_frac=0.32,
-         dpi=None,
-         title=None,
-         xlabel=None,
-         ylabel=None,
-         ratio_ylabel=None,
-         ncols=4,
-         right=0.98,
-         wspace=0.12,
-         hspace=0.12,
-      ):
-         """Like make_model_grid, but each model panel is a (main, ratio) pair of
-         axes stacked vertically and sharing the x-axis -- the ratio axis is short
-         and sits directly beneath its main axis. All ratio axes share ONE y-axis
-         so the panels are directly comparable."""
-         nmodels = len(models)
-         if nmodels % ncols != 0:
-            raise ValueError(f"Expected models divisible by ncols={ncols}, got {nmodels}.")
-         nmodel_rows = nmodels // ncols
-
-         fig = plt.figure(
-            figsize=(width_per_ax * ncols, height_per_ax * nmodel_rows * (1 + ratio_height_frac)),
-            dpi=dpi,
-         )
-
-         height_ratios = [1.0, ratio_height_frac] * nmodel_rows
-         gs = fig.add_gridspec(
-            nmodel_rows * 2, ncols,
-            height_ratios=height_ratios,
-            left=0.05, right=right, bottom=0.075, top=0.95,
-            wspace=wspace, hspace=hspace,
-         )
-
-         main_axs = []
-         ratio_axs = []
-         ratio_ax0 = None                       # all ratio axes share one y-axis
-         for i in range(nmodels):
-            row_block, col = divmod(i, ncols)
-            main_ax = fig.add_subplot(gs[row_block * 2, col])
-            ratio_ax = fig.add_subplot(gs[row_block * 2 + 1, col], sharex=main_ax,
-                                       sharey=ratio_ax0)
-            if ratio_ax0 is None:
-               ratio_ax0 = ratio_ax
-            plt.setp(main_ax.get_xticklabels(), visible=False)
-            if ratio_ylabel and col == 0:
-               ratio_ax.set_ylabel(ratio_ylabel, fontweight="bold", fontsize=EXTRA_TEXT_FONTSIZE)
-            main_axs.append(main_ax)
-            ratio_axs.append(ratio_ax)
-
-         if title:
-            fig.suptitle(title, fontsize=20, fontweight="bold")
-
-         if xlabel:
-            fig.text(0.5, 0.02, xlabel, ha='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold")
-
-         if ylabel:
-            fig.text(0.02, 0.5, ylabel, ha='center', va='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold", rotation=90.)
-
-         return fig, np.asarray(main_axs), np.asarray(ratio_axs)
-
-
-      def ensure_dirs(outdir, current_dir, sections):
-         for section in sections:
-            (outdir / current_dir / section / "png").mkdir(parents=True, exist_ok=True)
-         (outdir / current_dir / "tables").mkdir(parents=True, exist_ok=True)
-
-
-      def make_model_grid_3d(models, title=None, width_per_ax=6, height_per_ax=5, ncols=4, nrows=2):
-         """4x2 grid of 3D axes (mirrors make_model_grid's layout), for the
-         (T, H, N) radiative-regression scatter + fit-plane panels."""
-         fig, axs = plt.subplots(
-            nrows, ncols,
-            figsize=(width_per_ax * ncols, height_per_ax * nrows),
-            subplot_kw={"projection": "3d"},
-         )
-         fig.subplots_adjust(left=0.02, right=0.95, bottom=0.03, top=0.92, wspace=0.10, hspace=0.10)
-         if title:
-            fig.suptitle(title, fontsize=20, fontweight="bold")
-         return fig, np.asarray(axs).ravel()
-
-
-      def plot_regression_3d(ax, T, H, N, F, lam, eps, model, cmap="RdBu_r", resid_norm=None):
-         """Scatter the AOGCM (T, H, N) points and overlay the multilinear
-         regression plane N = F - lam*T - (eps-1)*H. Points are colored by the
-         signed residual (obs - plane) so the panel shows both the geometry of
-         the fit and how tightly the data hug it. Returns (scatter, residuals)
-         so the caller can apply one shared symmetric color scale across models.
-         """
-         Nfit = F - lam * T - (eps - 1.0) * H
-         resid = N - Nfit
-         ss_res = float(np.sum(resid ** 2))
-         ss_tot = float(np.sum((N - np.mean(N)) ** 2))
-         r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
-         rmse = float(np.sqrt(np.mean(resid ** 2)))
-
-         sc = ax.scatter(T, H, N, c=resid, cmap=cmap, norm=resid_norm, s=10, depthshade=False)
-
-         Tg, Hg = np.meshgrid(
-            np.linspace(np.min(T), np.max(T), 12),
-            np.linspace(np.min(H), np.max(H), 12),
-         )
-         Ng = F - lam * Tg - (eps - 1.0) * Hg
-         ax.plot_surface(Tg, Hg, Ng, color="0.5", alpha=0.25, linewidth=0, antialiased=True)
-
-         ax.set_xlabel("T (K)", fontsize=PANEL_AXIS_FONTSIZE, fontweight="bold")
-         ax.set_ylabel(r"H (W m$^{-2}$)", fontsize=PANEL_AXIS_FONTSIZE, fontweight="bold")
-         ax.set_zlabel("N (W m$^{-2}$)", fontsize=PANEL_AXIS_FONTSIZE, fontweight="bold")
-         ax.tick_params(labelsize=7)
-         ax.set_title(rf"{model}: $\epsilon$={eps:.2f}, $R^2$={r2:.3f}, RMSE={rmse:.3f}",
-                      fontsize=10, fontweight="bold")
-         return sc, resid
 
 
       def as_1d_float(x):
@@ -906,9 +710,6 @@ for run_type in [1, 2, 3]:
       df = pd.DataFrame(columns=PARAM_COLS)
       df["model"] = fit_models
 
-      outdir = Path("./figures_2013b")
-      outdir.mkdir(exist_ok=True)
-      ensure_dirs(outdir, current_dir, ["step1", "step2", "validation", "unblinded", "budget"])
 
       # Cache all model series so every step uses identical baselines and slices.
       series_by_model: Dict[str, SeriesBundle] = {}
@@ -982,22 +783,11 @@ for run_type in [1, 2, 3]:
             plot_uptake_vs_T(step1_HT_axs[imodel], bundle, fit, H_prev, model)
 
          if SAVE_ITERATION_PLOTS:
-            suffix = f"iter{iteration + 1:02d}"
-            step1_fig.savefig(
-                  outdir / current_dir / "step1" / "png" / f"4xCO2_all_models_T2M_vs_NETTOA_{suffix}.png",
-                  dpi=200,
-                  bbox_inches="tight",
-            )
-            step1_NH_fig.savefig(
-                  outdir / current_dir / "step1" / "png" / f"4xCO2_all_models_H_vs_NETTOA_{suffix}.png",
-                  dpi=200,
-                  bbox_inches="tight",
-            )
-            step1_HT_fig.savefig(
-                  outdir / current_dir / "step1" / "png" / f"4xCO2_all_models_H_vs_T2M_{suffix}.png",
-                  dpi=200,
-                  bbox_inches="tight",
-            )
+            for fig_, name_ in ((step1_fig, "T2M_vs_NETTOA"),
+                                (step1_NH_fig, "H_vs_NETTOA"),
+                                (step1_HT_fig, "H_vs_T2M")):
+               layout.save(fig_, STEP1, figname("4xCO2", "all_models", name_),
+                           iteration=iteration + 1)
          plt.close(step1_fig)
          plt.close(step1_NH_fig)
          plt.close(step1_HT_fig)
@@ -1077,19 +867,16 @@ for run_type in [1, 2, 3]:
             plot_slow_fit(step2_axs[imodel], slow, model, iteration)
 
          if SAVE_ITERATION_PLOTS:
-            suffix = f"iter{iteration + 1:02d}"
-            step2_fig.savefig(
-                  outdir / current_dir / "step2" / "png" / f"4xCO2_all_models_log_Teq_minus_T_vs_t_{suffix}.png",
-                  dpi=200,
-                  bbox_inches="tight",
-            )
+            layout.save(step2_fig, STEP2,
+                        figname("4xCO2", "all_models", "log_Teq_minus_T_vs_t"),
+                        iteration=iteration + 1)
          plt.close(step2_fig)
 
          if VERBOSE:
             print("Finished Step 2: thermal parameters updated")
 
          # Save a table every iteration for debugging.
-         df.to_csv(outdir / current_dir / "tables" / f"params_iter{iteration + 1:02d}.csv", index=False)
+         df.to_csv(layout.csv_path(f"params_iter{iteration + 1:02d}"), index=False)
 
          # Check convergence after the minimum number of iterations.
          new_params = numeric_params_for_convergence(df)
@@ -1112,10 +899,10 @@ for run_type in [1, 2, 3]:
          print(f"Did not meet convergence tolerance after {MAX_ITERATIONS} iterations; using final iteration.")
 
       # Final parameter table.
-      df.to_csv(outdir / current_dir / "tables" / "params_final.csv", index=False)
+      df.to_csv(layout.csv_path("params_final"), index=False)
       # 2013a-compatible location, so the tau_s-vs-calibration-time plot below
       # can cross-reference tau_s from the other two run_types' results.
-      df.to_csv(outdir / current_dir / "fitted_model_params.csv", index=False)
+      df.to_csv(layout.csv_path("fitted_model_params"), index=False)
       print(df)
 
       # ------------------------- 3D view of the radiative regression -------------------------
@@ -1142,7 +929,7 @@ for run_type in [1, 2, 3]:
          )
          T, N = bundle.T_full, bundle.N_full
          good = finite_pair_mask(T, N, H)
-         sc, resid = plot_regression_3d(axs3d[imodel], T[good], H[good], N[good], F, lam, eps, model)
+         sc, resid = plot_regression_3d(axs3d[imodel], T[good], H[good], N[good], F, lam, eps, model, s=10)
          reg3d_scatters.append((sc, resid))
 
       # One shared, symmetric (diverging) residual color scale across all panels.
@@ -1155,10 +942,7 @@ for run_type in [1, 2, 3]:
       smap.set_array([])
       cbar = fig3d.colorbar(smap, ax=list(axs3d), fraction=0.015, pad=0.02)
       cbar.set_label(r"N residual (obs $-$ fit) [W m$^{-2}$]", fontsize=13, fontweight="bold")
-      fig3d.savefig(
-         outdir / current_dir / "step1" / "png" / f"4xCO2_all_models_N_T_H_regression3d{run_type_suffix}.png",
-         dpi=200, bbox_inches="tight",
-      )
+      layout.save(fig3d, STEP1, figname("4xCO2", "all_models", "N_T_H_regression3d"))
       plt.close(fig3d)
 
       # ------------------------- Compare parameters to paper values -------------------------
@@ -1291,11 +1075,8 @@ for run_type in [1, 2, 3]:
          for ax in axs_val[nvars:]:
             ax.set_visible(False)
 
-         fig_val.savefig(
-            outdir / current_dir / "validation" / "png" / "all_validation_params_GF_vs_SN.png",
-            dpi=200,
-            bbox_inches="tight",
-         )
+         layout.save(fig_val, VALIDATION,
+                     figname("all_models", "validation_params_GF_vs_SN"))
          plt.close(fig_val)
       else:
          print("Skipping validation plot: none of the hard-coded paper model names are present in df.")
@@ -1494,7 +1275,7 @@ for run_type in [1, 2, 3]:
 
          ax2.set_xlim(left[0], right[-1])
          ax2.set_xlabel("Time (years)", fontsize=14, fontweight="bold")
-         fig.savefig(str(png_path), dpi=150, bbox_inches="tight")
+         fig.savefig(str(png_path), dpi=DPI_WIDE, bbox_inches="tight")
          plt.close(fig)
 
 
@@ -1567,7 +1348,7 @@ for run_type in [1, 2, 3]:
          plot_surface_budget_bars(
             model, F_ref, lmbda, epsilon, C, T_eq, a_f, a_s, tau_f, tau_s,
             float(np.max(t)),
-            outdir / current_dir / "budget" / "png" / f"{model}_surface_budget_bars.png",
+            layout.reserve(BUDGET, figname("4xCO2", model, "surface_budget_bars")),
          )
 
          # ----------------- T2M time-series plot -----------------
@@ -1789,17 +1570,11 @@ for run_type in [1, 2, 3]:
             ax.set_xscale(scale)
             ax.set_xlim(1, xmax + 1)
 
-         final_fig.savefig(
-            outdir / current_dir / results / "png" / f"4xCO2_all_models_T2m_vs_t_{results}_{scale}.png",
-            dpi=200,
-            bbox_inches="tight",
-         )
+         layout.save_results(final_fig,
+                             figname("4xCO2", "all_models", "T2m_vs_t", scale))
 
-         nettoa_fig.savefig(
-            outdir / current_dir / results / "png" / f"4xCO2_all_models_NETTOA_timeseries_{scale}.png",
-            dpi=200,
-            bbox_inches="tight",
-         )
+         layout.save_results(nettoa_fig,
+                             figname("4xCO2", "all_models", "NETTOA_timeseries", scale))
 
       plt.close(final_fig)
       plt.close(nettoa_fig)
@@ -1841,19 +1616,12 @@ for run_type in [1, 2, 3]:
                     fontweight="bold", fontsize=EXTRA_TEXT_FONTSIZE,
                     va="bottom", ha="center")
 
-      tau_s_fig.savefig(
-         outdir / current_dir / "step2" / "png" / f"4xCO2_all_models_tau_s_vs_calibration_t{run_type_suffix}.png",
-         dpi=200,
-         bbox_inches="tight",
-      )
+      layout.save(tau_s_fig, STEP2,
+                  figname("4xCO2", "all_models", "tau_s_vs_calibration_t"))
       plt.close(tau_s_fig)
 
       if results == "unblinded":
-         assmpt_fig.savefig(
-            outdir / current_dir / results / "png" / f"4xCO2_all_models_cdTdt_t_{results}.png",
-            dpi=200,
-            bbox_inches="tight",
-         )
+         layout.save_results(assmpt_fig, figname("4xCO2", "all_models", "cdTdt_t"))
          plt.close(assmpt_fig)
 
          if sc_for_cbar is not None:
@@ -1862,14 +1630,10 @@ for run_type in [1, 2, 3]:
             cbar.set_label("Year", fontsize=18, fontweight="bold")
             cbar.ax.tick_params(labelsize=16)
 
-         ohct_fig.savefig(
-            outdir / current_dir / results / "png" / "4xCO2_all_models_ohc_ts.png",
-            dpi=200,
-            bbox_inches="tight",
-         )
+         layout.save_results(ohct_fig, figname("4xCO2", "all_models", "ohc_ts"))
          plt.close(ohct_fig)
 
       print("Finished final val/result plots")
       print("Done.")
-      print(f"Final parameter table: {outdir / current_dir / 'tables' / 'params_final.csv'}")
-      print(f"2013a-compatible parameter table: {outdir / current_dir / 'fitted_model_params.csv'}")
+      print(f"Final parameter table: {layout.csv_path('params_final')}")
+      print(f"2013a-compatible parameter table: {layout.csv_path('fitted_model_params')}")

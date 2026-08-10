@@ -1,10 +1,17 @@
 # Large figure-output directories: untracked to save /home quota.
 # Prior committed versions remain recoverable from git history
 # (git checkout <commit> -- <dir>).
-figures_diffusive-eps/
-figures_2013a/
-figures_diffusive/
+# Only these three variants are ignored -- the rest of figures/ is tracked.
+figures/diffusive-eps/
+figures/2013a/
+figures/diffusive/
 
 # Python bytecode cache (regenerated automatically on import).
 __pycache__/
 *.pyc
+
+# macOS Finder metadata.
+.DS_Store
+
+# Local Claude Code instructions.
+CLAUDE.md

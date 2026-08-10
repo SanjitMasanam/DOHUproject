@@ -15,19 +15,17 @@ from tqdm import tqdm
 from scipy.special import erfcx
 from scipy.optimize import curve_fit
 from pde_solver_1lyrEBM_diffusive import Params as PDEParams, solve_model as pde_solve_model, YEAR
-
-# Font used for every label/tick/legend on every plot in this script -- change
-# this one value to switch fonts everywhere (falls back to matplotlib's
-# default sans font if the named font isn't installed on this machine).
-PLOT_FONT_FAMILY = "Verdana"
-mpl.rcParams["font.family"] = PLOT_FONT_FAMILY
-
-# --- shared plot-styling sizes (keep identical across all longrun scripts) ---
-AXIS_LABEL_FONTSIZE  = 22   # figure-level x/y axis + side labels (was 18)
-PANEL_AXIS_FONTSIZE  = 13   # small per-panel axis labels: 3D x/y/z, format_ax (was 9/default)
-MODEL_LABEL_FONTSIZE = 15   # bold top-left model tag
-EXTRA_TEXT_FONTSIZE  = 12   # param boxes under the model tag (was 8)
-# NOTE: plot titles are intentionally left at their current sizes.
+from figure_paths import BUDGET, DPI_WIDE, STEP1, RunLayout, figname
+# Importing plot_style applies the shared rcParams; the *_FONTSIZE constants are
+# re-exported here because this script's own plotting code still references them.
+from plot_style import (
+   AXIS_LABEL_FONTSIZE,
+   EXTRA_TEXT_FONTSIZE,
+   MODEL_LABEL_FONTSIZE,
+   PANEL_AXIS_FONTSIZE,
+   format_ax,
+   make_model_grid,
+)
 
 # "Purely diffusive" limit of the 1-box + diffusive model: h_ml -> 0 makes
 # the mixed-layer heat capacity vanish, which is singular in the PDE solver
@@ -75,6 +73,7 @@ PDE_FIT_N_SAVE = 250
 PDE_FIT_DZ_TARGET = 15.0
 
 # Progress/ETA tracking across the whole script (all run_types x results x models).
+VARIANT = "diffusive"
 RUN_TYPES = [3, 2, 1]
 RESULT_KINDS = ["unblinded"]
 _SCRIPT_START_TIME = time.time()
@@ -315,7 +314,7 @@ def plot_surface_budget_bars(model, kappa, h_ml, F_ref, T_eq, t_final_years,
 
    ax2.set_xlim(left[0], right[-1])
    ax2.set_xlabel("Time (years)", fontsize=14, fontweight="bold")
-   fig.savefig(str(png_path), dpi=150, bbox_inches="tight")
+   fig.savefig(str(png_path), dpi=DPI_WIDE, bbox_inches="tight")
    plt.close(fig)
 
 
@@ -350,28 +349,14 @@ tcr = {
     "MPIESM11": 2.0,    # MPI-ESM1-LR
 }
 
-# Output directory (created once; per-run_type subdirs are made inside the loop)
-outdir = Path("./figures_diffusive")
-outdir.mkdir(exist_ok=True)
-
 for run_type in RUN_TYPES:
    for results in RESULT_KINDS:
-      dir_list = [
-         "replicate_results",
-         "50-yr_avg_forcing_results",
-         "50-yr_avg_LR_fit_results",
-      ]
-      current_dir = dir_list[run_type - 1]
+      # Output destination for this (run_type, results) pass. Directories are
+      # created by the writes themselves, so none is made that stays empty.
+      layout = RunLayout(VARIANT, run_type, results)
       print("==================================")
-      print(f"Current Dir: {current_dir}\nType of output: {results}")
+      print(f"Output: {layout.label}")
       print("==================================")
-
-      extra_text = {
-         1: "",
-         2: "50yrAvg",
-         3: "50yrAvg_LRparamFit",
-      }[run_type]
-      suffix = f"_{extra_text}" if extra_text else ""
 
       def sympy_prop_unc(expr, values, uncertainties):
          """Propagate uncertainties through a SymPy expression (first-order, uncorrelated)."""
@@ -383,75 +368,6 @@ for run_type in RUN_TYPES:
          return float(np.sqrt(variance))
 
 
-      def format_ax(ax, title="", xlabel="", ylabel="", text="",
-                  xscale="linear", yscale="linear",
-                  xlim=None, ylim=None,
-                  xticks=None, yticks=None,
-                  xspacing=True, yspacing=True,
-                  legend=True, legend_loc='upper right', grid=True):
-
-         ax.set(xscale=xscale, yscale=yscale, xlim=xlim, ylim=ylim)
-         if title:  ax.set_title(title, fontweight="bold")
-         if xlabel: ax.set_xlabel(xlabel, fontweight="bold", fontsize=PANEL_AXIS_FONTSIZE)
-         if ylabel: ax.set_ylabel(ylabel, fontweight="bold", fontsize=PANEL_AXIS_FONTSIZE)
-
-         if text:
-            ax.text(0.02, 0.98, text, transform=ax.transAxes, weight='bold',
-                     fontsize=MODEL_LABEL_FONTSIZE, va="top", ha="left",
-                     bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4))
-
-         if xticks is not None: ax.set_xticks(xticks)
-         if yticks is not None: ax.set_yticks(yticks)
-
-         ax.tick_params(labelsize=14, width=2, length=8, direction="in")
-         if grid: ax.grid(alpha=0.3)
-         if legend: ax.legend(loc=legend_loc, prop={'weight': 'bold', 'size': 12})
-
-      def make_model_grid(
-         models,
-         width_per_ax=6,
-         height_per_ax=6,
-         dpi=None,
-         title=None,
-         xlabel=None,
-         ylabel=None,
-         ncols=4,
-         nrows=2,
-         right=0.98,
-         wspace=0.12,
-         hspace=0.18,
-      ):
-         nmodels = len(models)
-         if nmodels % 2 != 0:
-            raise ValueError(f"Expected an even number of models, got {nmodels}.")
-
-         ncols, nrows = 4, 2
-
-         fig, axs = plt.subplots(
-            nrows,
-            ncols,
-            figsize=(width_per_ax * ncols, height_per_ax * nrows),
-            dpi=dpi,
-            constrained_layout=False,
-         )
-
-         fig.subplots_adjust(left=0.05, right=right, bottom=0.075, top=0.95, wspace=wspace, hspace=hspace)
-
-         if title:
-            fig.suptitle(title, fontsize=20, fontweight="bold")
-
-         if xlabel:
-            fig.text(0.5, 0.02, xlabel, ha='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold")
-
-         if ylabel:
-            fig.text(0.02, 0.5, ylabel, ha='center', va='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold", rotation=90.)
-
-         return fig, np.asarray(axs).ravel()
-
-
-      def ensure_dirs(outdir, current_dir, sections):
-         for section in sections:
-            (outdir / current_dir / section / "png").mkdir(parents=True, exist_ok=True)
 
       # Create dataframe to store model parameters
       param_cols = [
@@ -469,8 +385,6 @@ for run_type in RUN_TYPES:
       ]
       df = pd.DataFrame(columns=param_cols)
       df["model"] = fit_models
-
-      ensure_dirs(outdir, current_dir, ["step1", "validation", "unblinded", "budget"])
 
       # Prepare combined figures for each experiment
       step1_figs = {}
@@ -665,11 +579,8 @@ for run_type in RUN_TYPES:
 
       # Save the combined Step 1 and Net TOA timeseries figures
       for expt in ["4xCO2"]:
-         step1_figs[expt].savefig(
-            outdir / current_dir / "step1" / "png" / f"{expt}_all_models_T2M_vs_NETTOA{suffix}.png",
-            dpi=200,
-            bbox_inches="tight",
-         )
+         layout.save(step1_figs[expt], STEP1,
+                     figname(expt, "all_models", "T2M_vs_NETTOA"))
          plt.close(step1_figs[expt])
 
       print("Finished Step 1: saved combined Step 1 figures & params to df")
@@ -796,7 +707,7 @@ for run_type in RUN_TYPES:
                # (eps=1 special case of the EBM-epsilon scripts' budget plot).
                plot_surface_budget_bars(
                   model, kappa_pde, h_ml_pde, F_ref, T_eq, t_final_years,
-                  outdir / current_dir / "budget" / "png" / f"{expt}_{model}_surface_budget_bars{suffix}.png",
+                  layout.reserve(BUDGET, figname(expt, model, "surface_budget_bars")),
                )
 
                # Purely diffusive counterpart (h_ml -> 0, infinite ocean): uses
@@ -1185,27 +1096,21 @@ for run_type in RUN_TYPES:
                else:
                   ax.xaxis.set_major_locator(mpl.ticker.LogLocator())
 
-            final_figs[expt].savefig(
-               outdir / current_dir / results / "png" / f"{expt}_all_models_T2m_vs_t_{results}_{scale}{suffix}.png",
-               dpi=200,
-               bbox_inches="tight",
-            )
+            layout.save_results(final_figs[expt],
+                                figname(expt, "all_models", "T2m_vs_t", scale))
 
             for ax, xmax in zip(nettoa_axs[expt], final_xmax[expt]):
                ax.set_xscale(scale)
                ax.set_xlim(1, xmax + 1)
 
-            nettoa_figs[expt].savefig(
-               outdir / current_dir / results / "png" / f"{expt}_all_models_NETTOA_timeseries_{results}_{scale}{suffix}.png",
-               dpi=200,
-               bbox_inches="tight",
-            )
+            layout.save_results(nettoa_figs[expt],
+                                figname(expt, "all_models", "NETTOA_timeseries", scale))
 
-         step1_HT_figs[expt].savefig(
-            outdir / current_dir / results / "png" / f"{expt}_all_models_H_vs_T2M_{results}{suffix}.png",
-            dpi=200,
-            bbox_inches="tight",
-         )
+         # H vs T2M is a Step 1 regression, so it belongs beside the other two
+         # in step1/ -- this script used to be the only one filing it under the
+         # results section.
+         layout.save(step1_HT_figs[expt], STEP1,
+                     figname(expt, "all_models", "H_vs_T2M"))
          plt.close(step1_HT_figs[expt])
 
          plt.close(final_figs[expt])
@@ -1289,11 +1194,7 @@ for run_type in RUN_TYPES:
                   if scale == "log":
                      ax.xaxis.set_major_locator(mpl.ticker.LogLocator())
 
-               fig.savefig(
-                  outdir / current_dir / results / "png" / f"{expt}_all_models_{name}_{results}_{scale}{suffix}.png",
-                  dpi=200,
-                  bbox_inches="tight",
-               )
+               layout.save_results(fig, figname(expt, "all_models", name, scale))
             plt.close(fig)
 
          heatmap_figs_to_save = [
@@ -1301,22 +1202,14 @@ for run_type in RUN_TYPES:
             (sens_rmse_figs[expt], "sensitivity_heatmap_rmse"),
          ]
          for fig, name in heatmap_figs_to_save:
-            fig.savefig(
-               outdir / current_dir / results / "png" / f"{expt}_all_models_{name}_{results}{suffix}.png",
-               dpi=200,
-               bbox_inches="tight",
-            )
+            layout.save_results(fig, figname(expt, "all_models", name))
             plt.close(fig)
 
          if results == 'unblinded':
             cbar = ohc_ts_figs[expt].colorbar(sc, ax=ohc_ts_axs[expt].ravel().tolist(), fraction=0.025, pad=0.025)
             cbar.set_label("Year")
 
-            ohc_ts_figs[expt].savefig(
-               outdir / current_dir / results / "png" / f"{expt}_all_models_ohc_ts{suffix}.png",
-               dpi=200,
-               bbox_inches="tight",
-            )
+            layout.save_results(ohc_ts_figs[expt], figname(expt, "all_models", "ohc_ts"))
             plt.close(ohc_ts_figs[expt])
 
       print("Finished final val/result plots")

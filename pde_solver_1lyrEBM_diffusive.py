@@ -80,7 +80,7 @@ All figures are saved into ./1lyEBM_diffusive/ (created if absent).
 All sanity checks print PASS/FAIL blocks to stdout.
 """
 
-import os
+from figure_paths import CHECKS_DIR
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -102,7 +102,11 @@ except ImportError:
 YEAR = 365.25 * 24 * 3600.0          # seconds per year
 CM2S_TO_M2S = 1.0e-4                 # 1 cm^2/s = 1e-4 m^2/s (paper quotes k in cm^2/s)
 
-OUTDIR = "figures_diffusiveChecks"          # all figures go here (created below)
+# All figures from this module's verification suite go here (created below).
+# figure_paths owns the location so it moves with the rest of the tree; this
+# module keeps its own single-panel plot style, which is deliberately different
+# from the longrun scripts' multi-panel house style.
+OUTDIR = CHECKS_DIR
 
 # Semi-infinite ("effectively infinite ocean") domain sizing. When
 # Params.semi_infinite is True, solve_model places the insulated bottom
@@ -304,7 +308,7 @@ def check(label, ok, detail=""):
 
 
 def savefig(fig, name):
-    path = os.path.join(OUTDIR, name)
+    path = OUTDIR / name
     fig.savefig(path, dpi=150)
     plt.close(fig)
     print(f"  saved {path}")
@@ -321,7 +325,7 @@ def style_axes(ax):
 # Main experiment suite
 # =================================================================
 def main():
-    os.makedirs(OUTDIR, exist_ok=True)
+    OUTDIR.mkdir(parents=True, exist_ok=True)
 
     # -----------------------------------------------------------------
     # Parameter echo: derived quantities, so unit errors are visible at

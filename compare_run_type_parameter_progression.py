@@ -4,94 +4,22 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from pathlib import Path
+
+from figure_paths import comparison_dir, params_csv
+from plot_style import format_ax, make_model_grid
+
+# The variants this script compares run types across. Both write their
+# parameter tables to figures/<variant>/<run_type>/tables/.
+VARIANTS = ["2013a", "2013b"]
 
 
-def format_ax(ax, title="", xlabel="", ylabel="", text="",
-            xscale="linear", yscale="linear",
-            xlim=None, ylim=None,
-            xticks=None, yticks=None,
-            xspacing=True, yspacing=True,
-            legend=True, legend_loc='upper right', grid=True):
-
-   ax.set(title=title, xlabel=xlabel, ylabel=ylabel,
-         xscale=xscale, yscale=yscale,
-         xlim=xlim, ylim=ylim)
-
-   if text:
-      ax.text(0.02, 0.98, text, transform=ax.transAxes, weight='bold',
-               fontsize=15, va="top", ha="left",
-               bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4))
-
-   if xticks is not None: ax.set_xticks(xticks)
-   if yticks is not None: ax.set_yticks(yticks)
-
-   ax.tick_params(labelsize=14, width=2, length=8, direction="in")
-   if grid: ax.grid(alpha=0.3)
-   if legend: ax.legend(loc=legend_loc, prop={'weight': 'bold', 'size': 12})
-
-
-def make_model_grid(
-   models,
-   width_per_ax=6,
-   height_per_ax=6,
-   dpi=None,
-   title=None,
-   xlabel=None,
-   ylabel=None,
-   ncols=4,
-   nrows=2,
-   right=0.98,
-   wspace=0.12,
-   hspace=0.18,
-):
-   # Unlike the *_allModels.py scripts (always exactly 8 fixed models), this
-   # script's model list is read back from a CSV and can vary in size, so the
-   # grid must be sized to fit however many models are actually present.
-   nmodels = len(models)
-   nrows = int(np.ceil(nmodels / ncols))
-
-   fig, axs = plt.subplots(
-      nrows,
-      ncols,
-      figsize=(width_per_ax * ncols, height_per_ax * nrows),
-      dpi=dpi,
-      constrained_layout=False,
-   )
-
-   fig.subplots_adjust(left=0.05, right=right, bottom=0.075, top=0.95, wspace=wspace, hspace=hspace)
-
-   if title:
-      fig.suptitle(title, fontsize=20, fontweight="bold")
-
-   if xlabel:
-      fig.text(0.5, 0.02, xlabel, ha='center', fontsize=18, fontweight="bold")
-
-   if ylabel:
-      fig.text(0.02, 0.5, ylabel, ha='center', va='center', fontsize=18, fontweight="bold", rotation=90.)
-
-   axs = np.asarray(axs).ravel()
-   for ax in axs[nmodels:]:
-      ax.set_visible(False)
-
-   return fig, axs
-
-
-def load_run_type_dfs(base_dir):
-    # Map each fitting procedure version to the directory that contains its CSV output.
-    run_type_dirs = {
-        1: "geoffroy_replicate_results",
-        2: "50-yr_avg_forcing_results",
-        3: "50-yr_avg_tau_s_LR_fit_results",
-    }
-    # Read each CSV into a dataframe so the parameter values for all run types can be compared.
+def load_run_type_dfs(variant):
+    """Read one dataframe per run type. params_csv() resolves the table name,
+    so this no longer has to know that 2013b writes params_final.csv where
+    2013a writes fitted_model_params.csv."""
     dfs = {}
-    for run_type, subdir in run_type_dirs.items():
-        if base_dir == Path("./figures_2013a"): csv_path = base_dir / subdir / "fitted_model_params.csv"
-        else: csv_path = base_dir / subdir / 'tables' / 'params_final.csv'
-        if not csv_path.exists():
-            raise FileNotFoundError(f"Missing CSV for run_type {run_type}: {csv_path}")
-        dfs[run_type] = pd.read_csv(csv_path)
+    for run_type in (1, 2, 3):
+        dfs[run_type] = pd.read_csv(params_csv(variant, run_type))
         dfs[run_type]["run_type"] = run_type
     return dfs
 
@@ -123,7 +51,11 @@ def plot_parameter_progression(dfs, output_dir):
     markers = {1: "o", 2: "s", 3: "^"}
     offsets = {1: -0.2, 2: 0.0, 3: 0.2}
 
-    fig, axs = make_model_grid(models, title="Parameter Progression during Fitting Procedure Changes", ylabel='A.U.')
+    # auto_rows: unlike the *_allModels.py scripts (always exactly 8 fixed
+    # models), this script's model list is read back from a CSV and can vary in
+    # size, so the grid must be sized to fit however many models are present.
+    fig, axs = make_model_grid(models, title="Parameter Progression during Fitting Procedure Changes",
+                               ylabel='A.U.', auto_rows=True, hide_unused=True)
 
     # Compute one shared log-scale y-axis range so every subplot uses the same visual scale.
     all_values = np.concatenate(
@@ -170,7 +102,6 @@ def plot_parameter_progression(dfs, output_dir):
         ax.legend(title="Fitting Procedure", loc='upper right', prop={'weight': 'bold', 'size': 11})
 
     # Save both raster and vector versions.
-    output_dir.mkdir(parents=True, exist_ok=True)
     out_png = output_dir / "parameter_progression_by_model.png"
     out_pdf = output_dir / "parameter_progression_by_model.pdf"
     fig.savefig(out_png, dpi=200, bbox_inches="tight")
@@ -179,7 +110,6 @@ def plot_parameter_progression(dfs, output_dir):
     print(f"Saved comparison plots to {out_png} and {out_pdf}")
 
 if __name__ == "__main__":
-    for base_dir in [Path("./figures_2013a"), Path("./figures_2013b")]:
-        output_dir = base_dir / "comparison_plots"
-        dfs = load_run_type_dfs(base_dir)
-        plot_parameter_progression(dfs, output_dir)
+    for variant in VARIANTS:
+        dfs = load_run_type_dfs(variant)
+        plot_parameter_progression(dfs, comparison_dir(variant))

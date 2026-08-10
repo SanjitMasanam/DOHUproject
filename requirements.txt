@@ -1,0 +1,18 @@
+# Python dependencies for the longrun parameter-fit scripts and the PDE solver.
+#
+# figure_paths.py, test_figure_paths.py, check_figure_paths.py and
+# migrate_figures.py are stdlib-only and need none of this.
+
+numpy
+pandas
+matplotlib
+scipy
+sympy
+tqdm
+
+# Reads data/int_netToa_longrun.Rdata; needs a working system R install.
+rpy2
+
+# Only used by longrun_data_param_fit_script_diffusive-eps-corner.py.
+emcee
+corner
