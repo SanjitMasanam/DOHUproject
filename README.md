@@ -16,7 +16,8 @@ and plot styling with the others.
 | Path | Role |
 | --- | --- |
 | [get_int_nettoa_longrun_data.R](get_int_nettoa_longrun_data.R) | Reads LongRunMIP NetCDF and writes the `.Rdata` bundle every Python script consumes |
-| [data/](data/) | `int_netToa_longrun.Rdata` — the preprocessed per-model time series |
+| [data/](data/) | `int_netToa_longrun.Rdata` — the preprocessed per-model time series; `li2012_fig1_N_vs_T.csv` — the digitized ECHAM5/MPIOM `N` and `T` the MT2 script's fifth model reads |
+| [extract_li2012_fig1.py](extract_li2012_fig1.py) | Digitizes Li et al. (2012) Fig. 1 out of the article PDF (needs `pymupdf`); writes the `li2012_fig1_*.csv` the MT2 script consumes |
 | [longrun_data_param_fit_script_2013a_allModels.py](longrun_data_param_fit_script_2013a_allModels.py) | Geoffroy 2013a two-box fit |
 | [longrun_data_param_fit_script_2013b_allModels.py](longrun_data_param_fit_script_2013b_allModels.py) | Geoffroy 2013b two-box + efficacy fit |
 | [longrun_data_param_fit_script_diffusive.py](longrun_data_param_fit_script_diffusive.py) | Slab + diffusive thermocline fit (no efficacy) |
@@ -64,7 +65,7 @@ run types and result kinds (see below).
 | `..._diffusive-eps-joint.py` | `diffusive-eps-joint` | One `least_squares` over `[log10(κ), h_ml, ε, λ]` against a stacked T and Net-TOA residual, with `T_eq` pinned from Step 1 | 3, 2, 1 × unblinded |
 | `..._diffusive-eps-joint_fixedRadiativeParams.py` | `diffusive-eps-joint_fixedRadiativeParams` | Reduced version of the same fit: only `[log10(κ), h_ml]` are free, `F_ref`/λ/ε/`T_eq` all fixed by Step 1 | 3, 2, 1 × unblinded |
 | `..._diffusive-eps-corner.py` | `diffusive-eps-corner` | `emcee` sampling of the 5-parameter posterior (`MCMC_N_WALKERS`, `MCMC_N_STEPS`, `MCMC_BURN`, `MCMC_THIN`) with `corner` plots | 1, 2, 3 × unblinded |
-| `..._MT2_allModels.py` | `MT2` | MT2 / MT2T model of Gregory et al. (2024): decomposes `N` into `N_M = pF` (from each model's AMOC strength `M_SV`) plus `N_T` from a two-layer ocean ODE, and derives `H = H_M + H_T` and OHUE `κ = κ_M + q`. Every panel carries both the paper's ensemble-mean constants (MT2) and per-AOGCM two-layer parameters fit by the paper's Appendix C.4.2 regression (MT2T). Runs the 4 models present in the paper's Table 1 | 1 × validation, `--unblinded` |
+| `..._MT2_allModels.py` | `MT2` | MT2 / MT2T model of Gregory et al. (2024): decomposes `N` into `N_M = pF` (from each model's AMOC strength `M_SV`) plus `N_T` from a two-layer ocean ODE, and derives `H = H_M + H_T` and OHUE `κ = κ_M + q`. Every panel carries both the paper's ensemble-mean constants (MT2) and per-AOGCM two-layer parameters fit by the paper's Appendix C.4.2 regression (MT2T). Runs the 4 models present in the paper's Table 1, plus the 6080-year ECHAM5/MPIOM run of Li et al. (2012) at a supplied `M` = 16 Sv, whose `N` and `T` come from that paper's Fig. 1c/1a via [extract_li2012_fig1.py](extract_li2012_fig1.py). That run ramps CO2 over its first 140 years rather than stepping, so its regressions are windowed past the ramp and its panels start there, while its integrals keep it | 1 × validation, `--unblinded` |
 
 [compare_run_type_parameter_progression.py](compare_run_type_parameter_progression.py) sits on top
 of these: for `2013a` and `2013b` it reads each run type's parameter table back and plots how
@@ -101,6 +102,12 @@ figures/<variant>/<NN_runtype>/tables/<name>.csv
 figures/<variant>/comparison/<name>.{png,pdf}
 figures/pde-checks/<name>.png
 ```
+
+`<name>` always ends with the variant that produced it —
+`4xCO2_all_models_T2M_vs_NETTOA_MT2.png`, `..._2013b.png`, `..._diffusive-eps.png` — so the same
+plot from two different models stays distinguishable once the files leave their directories.
+`RunLayout` appends it; the call sites pass the same `figname(...)` they always did. Set
+`INCLUDE_VARIANT_STAMP = False` in [figure_paths.py](figure_paths.py) for bare names.
 
 Scripts never build these paths as strings. Each pass constructs a
 `RunLayout(VARIANT, run_type, results)` and writes through it — `layout.save(fig, STEP1, name)`,

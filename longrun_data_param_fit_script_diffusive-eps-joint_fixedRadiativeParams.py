@@ -24,6 +24,7 @@ from plot_style import (
    EXTRA_TEXT_FONTSIZE,
    MODEL_LABEL_FONTSIZE,
    PANEL_AXIS_FONTSIZE,
+   SUPTITLE_FONTSIZE,
    format_ax,
    make_model_grid,
    make_model_grid_3d,
@@ -38,7 +39,7 @@ from plot_style import (
 H_ML_PURELY_DIFFUSIVE = 1.0e-6  # m
 
 # Ocean depth [m] for EVERY PDE solve in this script. This is a CLOSED domain:
-# a real physical floor at 2500 m carrying the solver's zero-flux (insulated)
+# a real physical floor at PDE_Z_MAX carrying the solver's zero-flux (insulated)
 # bottom BC, so the ocean is a finite heat reservoir. It is deliberately a
 # constant and NOT sized from the diffusive penetration depth
 # 2*sqrt(kappa*t_final) -- the earlier
@@ -50,7 +51,21 @@ H_ML_PURELY_DIFFUSIVE = 1.0e-6  # m
 # OHC_TS_EQUILIBRIUM_YEARS run) were solving on different physical domains. With
 # a fixed depth, kappa now changes only how fast heat moves through the column,
 # never how much column there is.
-PDE_Z_MAX = 2500.0  # m
+PDE_Z_MAX = 3700.0  # m
+
+# Reference ocean depth [m] the observed Net-TOA (NETTOA) stream is calibrated
+# against: the OHC normalization below divides cumulative NETTOA by the fixed
+# 1.37e21*3850 J/K full-ocean reference, which matches the model column's own
+# 5.1e14*4.186e6*z_max reference only at this depth. With PDE_Z_MAX deepened past
+# it, N is scaled by PDE_Z_MAX/NETTOA_REF_Z so the data and the model column stay
+# on ONE scale. The scaling is applied once, where NETTOA is read out of the R
+# dataset, so everything downstream (the STEP-1 F_ref/lambda regression, the joint
+# fit's Net-TOA residual and sigma_N, every N plot and the OHC panel) inherits it.
+# Being a single multiplicative factor it leaves T_eq = -bb/mb and eps = F_ref/bb
+# -- both ratios of scaled quantities -- unchanged, and scales F_ref and lambda
+# together so the PDE and its N = F - lambda*T - (eps-1)*H stay self-consistent.
+NETTOA_REF_Z = 2500.0                       # m
+NETTOA_SCALE = PDE_Z_MAX / NETTOA_REF_Z     # 3700/2500 = 1.48
 
 # Sensitivity sweep of the fitted kappa/h_ml around each model's best fit.
 SENSITIVITY_KAPPA_FACTOR_RANGE = (0.2, 5.0)   # multiplicative range around kappa_pde
@@ -91,8 +106,8 @@ PDE_FIT_N_SAVE = 250
 
 # Target vertical grid spacing [m] for the main kappa_pde/h_ml_pde fit's PDE
 # solves (make_pde_dT below). Nz = PDE_Z_MAX/PDE_FIT_DZ_TARGET + 1 (see
-# _pde_grid), so shrinking this refines the grid over the same fixed 2500 m
-# column to probe grid-resolution sensitivity of the fit. Default 15 m => 181
+# _pde_grid), so shrinking this refines the grid over the same fixed PDE_Z_MAX
+# column to probe grid-resolution sensitivity of the fit. Default 15 m => 247
 # levels.
 PDE_FIT_DZ_TARGET = 15.0
 
@@ -170,6 +185,10 @@ _cli.add_argument(
    "--high-res", action="store_true",
    help="High-resolution 2-D RMSE/t63 heatmaps: SENSITIVITY_N_2D=41 (41x41 grid) "
         "instead of the default 9 (9x9). Much slower (~21x the heatmap solves).")
+_cli.add_argument(
+   "--li", action="store_true",
+   help="Plot the ECHAM5 ocean-temperature-profile figure (six depths, with the "
+        "Li et al. 2012 Fig. 3 overlay). Default: skip.")
 _cli_args = _cli.parse_known_args()[0]
 _TEST_SPEC = _cli_args.test
 if _cli_args.high_res:
@@ -235,7 +254,7 @@ def _pde_grid(dz_target):
    response, the heat-uptake diagnostic and all sweep points are read off the
    SAME grid.
 
-   The depth is always PDE_Z_MAX (a closed, insulated 2500 m floor) and never a
+   The depth is always PDE_Z_MAX (a closed, insulated floor) and never a
    function of kappa or of the run length; only the requested vertical spacing
    dz_target sets Nz. Nz is floored at 4 because the surface-gradient stencils
    used downstream read theta[0..2]."""
@@ -650,6 +669,133 @@ def plot_surface_budget_bars(model, kappa, h_ml, eps, F_ref, T_eq, t_final_years
    plt.close(fig)
 
 
+# Depths [m] at which the ocean-temperature-profile figure below is sampled:
+# the AOGCM diagnostic levels of Li et al. (2012)'s 5170 m ocean, taken as
+# ABSOLUTE depths rather than as fractions of this script's column, so each
+# panel compares the two at the same physical depth instead of at the same
+# proportion of two different-length columns. Levels below PDE_Z_MAX therefore
+# have no counterpart in the diff-eps column at all: those panels are labelled
+# as such and carry no model curve (see plot_ocean_temperature_profiles).
+PROFILE_AOGCM_COLUMN_Z = 5170.0   # m; the AOGCM ocean depth these levels come from
+PROFILE_DEPTHS_M = (6.0, 1525.0, 2080.0, 3070.0, 4195.0, PROFILE_AOGCM_COLUMN_Z)
+
+# Digitized reference for that figure: the Li et al. (2012) Fig. 3 curves, one
+# (year, dT) record per model level, produced by extract_li2012_fig3.py (see that
+# script for how the curves come out of the PDF). Optional -- if the CSV has not
+# been generated, the panels are drawn without the reference. The paper's record
+# runs to ~6080 yr; only the first LI2012_FIG3_YEAR years are overlaid (the fit
+# window is far shorter), and that same year is where the diff-eps/Li ratio in
+# each panel tag is read.
+LI2012_FIG3_CURVES_CSV = (Path(__file__).resolve().parent / "data" /
+                          "li2012_fig3_curves.csv")
+LI2012_FIG3_YEAR = 1000.0
+
+
+def _load_li2012_fig3():
+   """Digitized Li et al. (2012) Fig. 3 curves as {depth [m]: (years, dT [K])},
+   or None if the CSV has not been generated.
+
+   The long-format CSV holds one row per digitized point per model level, so the
+   rows are grouped by depth and matched to PROFILE_DEPTHS_M BY depth rather
+   than by position -- a re-ordered file is then harmless, and a stale one shows
+   up as a depth with no rows. The paper's top level is 6 m rather than the
+   surface, hence the loose matching tolerance.
+   """
+   if not LI2012_FIG3_CURVES_CSV.exists():
+      return None
+   ref = pd.read_csv(LI2012_FIG3_CURVES_CSV)
+   tol = 0.01 * PROFILE_AOGCM_COLUMN_Z
+   out = {}
+   for depth in PROFILE_DEPTHS_M:
+      rows = ref[np.abs(ref["depth_m"] - depth) <= tol].sort_values("year")
+      if rows.empty:
+         raise ValueError(f"{LI2012_FIG3_CURVES_CSV} has no rows within "
+                          f"{tol:.0f} m of the {depth:.0f} m level "
+                          f"(PROFILE_DEPTHS_M)")
+      out[depth] = (rows["year"].to_numpy(), rows["dT_K"].to_numpy())
+   return out
+
+
+def plot_ocean_temperature_profiles(model, kappa, h_ml, eps, F_ref, T_eq,
+                                    t_final_years, png_path,
+                                    dz_target=PDE_FIT_DZ_TARGET):
+   """Ocean temperature anomaly theta(z, t) at the absolute PROFILE_DEPTHS_M,
+   one vertically stacked subplot per depth, over the whole run.
+
+   Reads the SAME cached best-fit solve as the budget/H diagnostics. Each
+   requested depth is snapped to the nearest solver level BELOW the surface --
+   the z = 0 slab is the model's surface temperature, not an ocean level, so the
+   6 m panel draws the first interior level instead of it -- and the panel tag
+   reports the level actually drawn. Depths BELOW the closed PDE_Z_MAX floor
+   have no counterpart in this column, so those panels say so and show only the
+   AOGCM reference -- no model curve is drawn (snapping them to the floor would
+   plot the deepest model level under a label claiming a depth it isn't). The
+   shared quantity is named once in the figure title, so the individual panels
+   carry no y-axis label.
+   """
+   pde_p, sol = _cached_pde_solve(kappa, h_ml, eps, F_ref, T_eq,
+                                  t_final_years, dz_target, PDE_FIT_N_SAVE)
+   t_yr, z, theta = sol["t"] / YEAR, sol["z"], sol["theta"]
+   z_max = z[-1]
+
+   ref = _load_li2012_fig3()
+
+   fig, axs = plt.subplots(len(PROFILE_DEPTHS_M), 1, figsize=(11, 14),
+                           sharex=True, layout="constrained")
+   for k, (ax, depth) in enumerate(zip(axs, PROFILE_DEPTHS_M)):
+      # Depths past the insulated floor are outside the diff-eps column: shade
+      # the panel, say so, and leave the model series off it entirely.
+      below_floor = depth > z_max
+      if below_floor:
+         ax.set_facecolor("0.93")
+         ax.text(0.5, 0.5, f"below the model column floor "
+                           f"(z$_{{max}}$ = {z_max:.0f} m)\nno diff-eps temperature at this depth",
+                 transform=ax.transAxes, ha="center", va="center",
+                 fontsize=13, fontweight="bold", color="0.35")
+         tag = f"z = {depth:.0f} m  (not in column)"
+      else:
+         # Nearest level EXCLUDING z = 0. That node is the mixed-layer slab,
+         # carrying its own energy budget rather than being an interior
+         # diffusive level, and it is the model's surface temperature. Only the
+         # 6 m panel is affected: on this grid (dz = 15 m) 6 m is nearer to 0
+         # than to the first real level, so plain nearest-level snapping put the
+         # slab under a "6 m" label and compared it against an AOGCM curve that
+         # is a 6 m OCEAN temperature -- in Li et al.'s own figures that level
+         # ends ~2 K below their surface series. Every deeper depth is far from
+         # 0 and snaps the same way either way.
+         iz = 1 + int(np.argmin(np.abs(z[1:] - depth)))
+         ax.plot(t_yr, theta[iz], color="#1f77b4", lw=2)
+         tag = f"z = {depth:.0f} m  (model level {z[iz]:.0f} m)"
+      # AOGCM reference: this depth's whole digitized Li et al. (2012) Fig. 3
+      # curve, truncated to the first LI2012_FIG3_YEAR years so the overlay
+      # covers the same span as the model series instead of running out to the
+      # paper's 6080-yr end. Kept on the below-floor panels too -- the AOGCM has
+      # water there even though this column does not.
+      if ref is not None:
+         yr_ref, dT_ref = ref[depth]
+         span = yr_ref <= LI2012_FIG3_YEAR
+         ax.plot(yr_ref[span], dT_ref[span], color="red", lw=1.6,
+                 label=f"Li et al. (2012) Fig. 3 (to yr {LI2012_FIG3_YEAR:.0f})")
+         # How far this depth's PDE response sits from the AOGCM at the end of
+         # that span: the second tag line is model/reference at LI2012_FIG3_YEAR
+         # (1 = agreement). Blank if the run is too short to reach that year,
+         # since np.interp would silently clamp to the last saved value, and
+         # blank on the below-floor panels, which have no model value to compare.
+         if not below_floor and t_yr[-1] >= LI2012_FIG3_YEAR:
+            model_at = float(np.interp(LI2012_FIG3_YEAR, t_yr, theta[iz]))
+            li_at = float(np.interp(LI2012_FIG3_YEAR, yr_ref, dT_ref))
+            tag += f"\ndiff-eps/Li = {model_at / li_at:.2f}"
+      format_ax(ax, text=tag, ylim=(0, 10),
+                legend=(ref is not None and k == 0), legend_loc="lower right")
+   axs[-1].set_xlim(t_yr[0], t_yr[-1])
+   axs[-1].set_xlabel("Time (years)", fontsize=AXIS_LABEL_FONTSIZE,
+                      fontweight="bold")
+   fig.suptitle("Global Mean Ocean Temperature Change [K]",
+                fontsize=SUPTITLE_FONTSIZE, fontweight="bold")
+   fig.savefig(str(png_path), dpi=DPI_WIDE, bbox_inches="tight")
+   plt.close(fig)
+
+
 # Sensitivity-sweep points are independent (kappa, h_ml) solves, so farm them
 # out across cores instead of running all ~100/model sequentially. Opened
 # once and reused for the whole script; closed at the very end.
@@ -860,8 +1006,10 @@ for run_type in RUN_TYPES:
             # types (these are physical properties of each model, not of the plot
             # window), so the full timeseries is always used -- run_type 1 is no
             # longer truncated to 150 years for this parameter estimation.
+            # NETTOA carries the NETTOA_SCALE = PDE_Z_MAX/NETTOA_REF_Z factor from
+            # the moment it is read, so every N below is on the model column's scale.
             t2m = np.array(expt_data.rx2("T2M")).ravel()
-            nettoa = np.array(expt_data.rx2("NETTOA")).ravel()
+            nettoa = np.array(expt_data.rx2("NETTOA")).ravel() * NETTOA_SCALE
 
             # Filter non-nan data
             quality_filter = np.isfinite(t2m) & np.isfinite(nettoa)
@@ -1019,9 +1167,9 @@ for run_type in RUN_TYPES:
          for expt in expts:
             expt_data = model_data.rx2(expt)
 
-            # Flatten T2M for the chosen results window
+            # Flatten T2M for the chosen results window (NETTOA scaled as in STEP 1)
             t2m = np.array(expt_data.rx2("T2M")).ravel()
-            nettoa = np.array(expt_data.rx2("NETTOA")).ravel()
+            nettoa = np.array(expt_data.rx2("NETTOA")).ravel() * NETTOA_SCALE
 
             # Drop invalid values before plotting
             quality_filter = np.isfinite(t2m)
@@ -1079,21 +1227,6 @@ for run_type in RUN_TYPES:
                   nettoa_plot = nettoa[300:]
                elif results == "unblinded":
                   nettoa_plot = nettoa
-
-               # Compute the fitted temperature curve & nettoa/OHC
-               popt, pcov = curve_fit(fit_func_diff, fit_t, fit_T)
-               perr = np.sqrt(np.diag(pcov))
-
-               T = popt[0]
-               T_unc = perr[0]
-
-               # Diffusivity implied by the analytic (h_ml=0) fit's timescale
-               # T, so it can be reused below as the PDE's kappa in the
-               # h_ml->0 numerical limit (see pde_p_h0), keeping that curve
-               # on the same diffusivity as "Diffusive Analytical" rather
-               # than the joint fit's kappa_pde (which trades off against
-               # a nonzero h_ml_pde and need not match D).
-               D = T * 31536000 * (lmbda/((10**3)*(4.22*10**3)))**2
 
                popt, pcov = curve_fit(fit_func_ode, fit_t, fit_T)
                perr = np.sqrt(np.diag(pcov))
@@ -1205,6 +1338,25 @@ for run_type in RUN_TYPES:
                joint_fit_check(model, joint)
                print(f"   [joint] {model}: kappa={kappa_pde:.2e} h_ml={h_ml_pde:.0f} | "
                      f"fixed F={F_ref:.2f} lam={lmbda:.2f} T_eq={T_eq:.2f} eps={eps:.3f}")
+
+               # Diffusive-analytical timescale T (years), from Held's
+               # semi-infinite relation T = kappa*(rho_cp)^2/lambda^2, using
+               # the SAME kappa_pde/lambda as the joint diff-eps+EBM fit above
+               # (rather than an independent 1-parameter fit of fit_func_diff
+               # to the AOGCM data), so "Diffusive Analytical" below shares its
+               # diffusivity and feedback with the joint fit's "Best Fit"
+               # curve. rho_cp is seawater's volumetric heat capacity, same
+               # constant as the H(t) analytical-solution overlay further down.
+               RHO_CP = 4.186e6  # J m^-3 K^-1
+               T = kappa_pde * RHO_CP**2 / lmbda**2 / YEAR
+
+               # Diffusivity for the h_ml->0 numerical PDE limit (pde_p_h0
+               # below): T is now derived FROM kappa_pde (not independently
+               # fit), so this is just kappa_pde -- pde_p_h0 becomes a
+               # numerical check of the closed-form "Diffusive Analytical"
+               # curve's own kappa_pde, rather than a separate equifinality
+               # comparison against an independently-fit diffusivity.
+               D = kappa_pde
 
                # F_ref/lambda/eps/T_eq were fixed in STEP 1 (already in df); only
                # kappa/h_ml and the joint diagnostics are written here. T_eq did
@@ -1346,6 +1498,15 @@ for run_type in RUN_TYPES:
                   layout.reserve(BUDGET, figname(expt, model, "surface_budget_bars")),
                )
 
+               # ECHAM5 only: theta(z, t) at six fractions of the column depth,
+               # stacked vertically over the whole run. Gated behind --li since
+               # it's rarely needed and adds another PDE-profile solve/save.
+               if model == "ECHAM5" and _cli_args.li:
+                  plot_ocean_temperature_profiles(
+                     model, kappa_pde, h_ml_pde, eps, F_ref, T_eq, t_final_years,
+                     layout.reserve(BUDGET, figname(expt, model, "ocean_temp_profiles")),
+                  )
+
                # Ocean heat uptake H(t) [W/m^2] over the plot window, for the
                # efficacy TOA decomposition N = F - lambda*T - (eps-1)*H below
                # (matches 2013b's Net TOA reconstruction; H = 0 recovers the
@@ -1353,13 +1514,12 @@ for run_type in RUN_TYPES:
                H_plot = pde_H_at(plot_t, kappa_pde, h_ml_pde, eps,
                                   F_ref, T_eq, t_final_years)
 
-               # Purely diffusive counterpart (h_ml -> 0): uses
-               # D (the diffusivity implied by the analytic h_ml=0 fit above),
-               # not kappa_pde, so this curve is directly comparable to
-               # "Diffusive Analytical" -- kappa_pde comes from the joint
-               # two-parameter fit where it trades off against a nonzero
-               # h_ml_pde (equifinality) and so need not equal the diffusivity
-               # that actually fits the data in the h_ml->0 limit. The
+               # Purely diffusive counterpart (h_ml -> 0): uses D = kappa_pde
+               # (see above -- "Diffusive Analytical"'s T is now derived from
+               # kappa_pde directly, so D and kappa_pde are the same number).
+               # This solve is therefore a numerical check of the closed-form
+               # "Diffusive Analytical" curve at that kappa_pde, in the
+               # h_ml->0 limit where the two should agree. The
                # mixed-layer heat capacity is taken to ~0 so the surface
                # responds essentially instantaneously to the flux balance at
                # the top of the thermocline, and the domain is auto-deepened
@@ -1400,7 +1560,7 @@ for run_type in RUN_TYPES:
                # window), the fit curve is integrated out to OHC_TS_EQUILIBRIUM_YEARS
                # so it traces the full approach to the (1, 1) equilibrium point.
                if results == 'unblinded':
-                  normalized_OHC = (5.1e14 * 31536000 * np.cumsum(nettoa)) / (1.37e21 * 3850)
+                  normalized_OHC = (5.1e14 * 31536000 * np.cumsum(nettoa)) / (1.37e21 * 3850 * NETTOA_SCALE)
 
                   # Run the SAME fitted kappa_pde/h_ml_pde out to (near-)equilibrium
                   # for the green fit curve. Evaluate on a 1-yr grid so cumsum(N)*
@@ -1415,7 +1575,7 @@ for run_type in RUN_TYPES:
                   H_eq = pde_H_at(eq_t, kappa_pde, h_ml_pde, eps, F_ref, T_eq,
                                   OHC_TS_EQUILIBRIUM_YEARS)
                   z_max_eq, _ = _pde_grid(PDE_FIT_DZ_TARGET)
-                  ohc_ref_eq = 1    # OHC_eq / T_eq  [J/K]
+                  ohc_ref_eq = 5.1e14 * 4.186e6 * z_max_eq    # OHC_eq / T_eq  [J/K]
                   N_pde = F_ref - lmbda * (T_eq * pde_T_eq) - (eps - 1.0) * H_eq
                   normalized_OHC_pred = (5.1e14 * 31536000 * np.cumsum(N_pde)) / ohc_ref_eq
 
@@ -1631,10 +1791,10 @@ for run_type in RUN_TYPES:
                ax.scatter(plot_t, T_eq*plot_T, s=4, color="red")
                ax.plot(plot_t, T_eq*plot_T, color="red", label="2-m Surface Temp.")
                # ax.plot(plot_t, T_eq*fit_func_ode(plot_t, tau), color="green", label="1-Box Analytical")
-               # ax.plot(plot_t, T_eq*fit_func_diff(plot_t, T), color="blue", label="Diffusive Analytical")
+               ax.plot(plot_t, T_eq*fit_func_diff(plot_t, T), color="blue", label="Diffusive Analytical")
                ax.plot(plot_t, T_eq*pde_T, color="purple", label="1-Box + Diffusion Fit")
-               # ax.plot(plot_t, T_eq*pde_T_h0, color="purple", ls="-.",
-               #         label=r"Diffusive Numerical (h$_{ml}\to0$, $\infty$ ocean)")
+               ax.plot(plot_t, T_eq*pde_T_h0, color="purple", ls="-.",
+                       label=r"Diffusive Numerical (h$_{ml}\to0$, $\infty$ ocean)")
                # ax.plot(plot_t, T_eq*pde_T_box, color="purple", ls="--",
                #         label=r"1-Box Numerical ($\kappa=0$)")
 

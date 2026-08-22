@@ -30,6 +30,7 @@ REPO = Path(__file__).resolve().parent
 
 SCRIPTS = sorted(REPO.glob("longrun_data_param_fit_script_*.py")) + [
    REPO / "compare_run_type_parameter_progression.py",
+   REPO / "compare_ohc_ts_across_models.py",
    REPO / "pde_solver_1lyrEBM_diffusive.py",
 ]
 

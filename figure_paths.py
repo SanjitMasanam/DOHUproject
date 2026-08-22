@@ -13,6 +13,11 @@ directory (e.g. "2013b", "diffusive-eps-joint"); `NN_runtype` is the numbered
 run-type directory, numbered so `ls` sorts in run order rather than
 alphabetically.
 
+Every filename ends with its variant (`..._T2M_vs_NETTOA_MT2.png`), so the same
+plot fit by two different models stays distinguishable once the files are out of
+their directories -- side by side in a viewer, dropped into a slide, or attached
+to an email. See INCLUDE_VARIANT_STAMP.
+
 Directories are created by writes, never declared up front -- `save()`,
 `reserve()` and `csv_path()` mkdir on demand, so a directory exists if and only
 if something was actually written into it. (The old `ensure_dirs()` helper
@@ -57,6 +62,14 @@ RUN_TYPE_STAMPS = {
    3: "50yrAvg_LRparamFit",
 }
 INCLUDE_RUNTYPE_STAMP = False
+
+# Trailing variant stamp: `4xCO2_all_models_T2M_vs_NETTOA` fit by the MT2 model
+# is written as `4xCO2_all_models_T2M_vs_NETTOA_MT2.png`. Unlike the run-type
+# stamp above this is on, because the variant is the axis these figures are
+# actually compared along -- the directory says which model produced a figure,
+# but the directory is exactly what gets lost the moment two of them are opened
+# side by side. Set to False to go back to bare names.
+INCLUDE_VARIANT_STAMP = True
 
 # Section names as constants, so a typo is an ImportError at the call site
 # rather than a silently-created stray directory (lazy mkdir would happily
@@ -144,13 +157,18 @@ class RunLayout:
       s = RUN_TYPE_STAMPS[self.run_type]
       return f"_{s}" if (s and INCLUDE_RUNTYPE_STAMP) else ""
 
+   @property
+   def variant_stamp(self) -> str:
+      """Trailing variant stamp (`_MT2`), empty if INCLUDE_VARIANT_STAMP is off."""
+      return f"_{self.variant}" if INCLUDE_VARIANT_STAMP else ""
+
    # -------------------------------------------------- pure path construction
 
    def path(self, section: str, name: str, ext: str = "png") -> Path:
       """Full path for one output. Pure -- creates nothing."""
       if section not in SECTIONS:
          raise ValueError(f"unknown section {section!r}; expected one of {sorted(SECTIONS)}")
-      return self.dir / section / f"{name}{self.stamp}.{ext}"
+      return self.dir / section / f"{name}{self.stamp}{self.variant_stamp}.{ext}"
 
    def results_path(self, name: str, ext: str = "png") -> Path:
       """Full path in whichever of unblinded/ or validation/ this pass writes."""
@@ -225,10 +243,12 @@ def params_csv(variant: str, run_type: int, root: Path = FIGURE_ROOT) -> Path:
    (everything else). Because every script now writes into tables/, callers no
    longer need to branch on which variant they are reading.
    """
-   d = RunLayout(variant, run_type, root=root).dir / TABLES
-   for candidate in ("params_final.csv", "fitted_model_params.csv"):
-      if (d / candidate).exists():
-         return d / candidate
+   layout = RunLayout(variant, run_type, root=root)
+   for candidate in ("params_final", "fitted_model_params"):
+      p = layout.path(TABLES, candidate, ext="csv")
+      if p.exists():
+         return p
    raise FileNotFoundError(
-      f"no parameter table (params_final.csv or fitted_model_params.csv) under {d}"
+      f"no parameter table (params_final or fitted_model_params, stamped "
+      f"{layout.variant_stamp!r}) under {layout.dir / TABLES}"
    )
