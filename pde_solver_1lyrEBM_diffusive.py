@@ -101,6 +101,8 @@ except ImportError:
 # =================================================================
 YEAR = 365.25 * 24 * 3600.0          # seconds per year
 CM2S_TO_M2S = 1.0e-4                 # 1 cm^2/s = 1e-4 m^2/s (paper quotes k in cm^2/s)
+F2X = 5.35 * np.log(2)               # 2xCO2 forcing [W m^-2], Myhre et al. (1998)
+T_2X = 70.0 * YEAR                   # linear ramp reaches F2X here (1%/yr CO2 doubling time)
 
 # All figures from this module's verification suite go here (created below).
 # figure_paths owns the location so it moves with the rest of the tree; this
@@ -163,6 +165,8 @@ class Params:
                                        # solve_model auto-deepens z_max/Nz so the
                                        # insulated bottom is never reached
                                        # ("effectively infinite ocean" limit)
+    forcing: object = None             # optional F(t) [W/m^2], t in s; replaces
+                                       # the constant F0 in the surface budget
 
     # ---- derived quantities (comments give units) ----
     @property
@@ -210,7 +214,8 @@ def make_rhs(dz, p):
         #   (du[1:-1]) is deliberately left unscaled, so the surface loses
         #   eps*H while the thermocline receives H -- the (eps-1)*H imbalance
         #   is the extra top-of-atmosphere response.
-        du[0] = (p.F0 - p.lam * T0 + p.epsilon * p.D * (u[1] - T0) / dz) / p.c_ml
+        F = p.F0 if p.forcing is None else p.forcing(t)
+        du[0] = (F - p.lam * T0 + p.epsilon * p.D * (u[1] - T0) / dz) / p.c_ml
 
         # --- interior nodes: plain diffusion ----------------------------
         du[1:-1] = p.kappa * (u[2:] - 2.0 * u[1:-1] + u[:-2]) / dz**2
@@ -282,6 +287,103 @@ def analytic_mixed_layer(t, p):
     the numerical solver must reproduce.
     """
     return p.dT_eq * (1.0 - np.exp(-t / p.tau_ml))
+
+
+def analytic_diffusive_profile(z, t, p):
+    """Held's exact step-response profile for the purely diffusive ocean (no
+    slab, semi-infinite), Carslaw & Jaeger (1959) sec. 2.7:
+
+        h(zeta, tau) = erfc(zeta/(2 sqrt(tau))) - e^(zeta+tau) erfc(zeta/(2 sqrt(tau)) + sqrt(tau))
+
+    with zeta = z/H, tau = t/T, H = D/lam and T = H^2/kappa. The second term
+    uses erfcx(x) = e^(x^2) erfc(x) to avoid overflow. Returns theta [C].
+    """
+    from scipy.special import erfc, erfcx
+    H = p.D / p.lam
+    zeta, tau = z / H, t / (H**2 / p.kappa)
+    x = zeta / (2 * np.sqrt(tau))
+    return p.dT_eq * (erfc(x) - erfcx(x + np.sqrt(tau)) * np.exp(-x**2))
+
+
+def analytic_diffusive_surface(t, t_knots, F_knots, p):
+    """Surface theta [C] of the purely diffusive ocean (no slab, semi-infinite)
+    for piecewise-linear forcing through (t_knots, F_knots), t_knots[0] = 0 and
+    F held constant after the last knot. By Duhamel on the step response
+    h(tau) = 1 - erfcx(sqrt(tau)): the jump F_knots[0] at t = 0 gives
+    F_knots[0]*h, and a ramp of slope s starting at t_k gives
+    s*T*H((t - t_k)/T), with H(tau) = int_0^tau h = tau + 1 - 2 sqrt(tau/pi)
+    - erfcx(sqrt(tau)). A ramp on [t_k, t_k+1] is a ramp at t_k minus one at
+    t_k+1.
+    """
+    from scipy.special import erfcx
+    T = (p.D / p.lam)**2 / p.kappa
+    h = lambda x: 1 - erfcx(np.sqrt(x))
+    H = lambda x: x + 1 - 2 * np.sqrt(x / np.pi) - erfcx(np.sqrt(x))
+    tau = lambda dt: np.maximum(dt, 0.0) / T
+    t = np.asarray(t, float)[:, None]
+    s = np.diff(F_knots) / np.diff(t_knots)
+    ramps = s * T * (H(tau(t - t_knots[:-1])) - H(tau(t - t_knots[1:])))
+    return (F_knots[0] * h(tau(t[:, 0])) + ramps.sum(axis=1)) / p.lam
+
+
+# -----------------------------------------------------------------
+# Beck & Woodbury (2013) X32B10T0: slab 0 < x < 1 heated by convection
+# from a fluid at T = 1 through x = 0 (Biot number Bi), insulated at x = 1,
+# T = 0 initially. All arguments and results are dimensionless. Equation
+# numbers are the report's (X32B1-n).
+# -----------------------------------------------------------------
+def beck_U(x, t, Bi):
+    """Eq. 10, U = e^(Bi x + Bi^2 t) erfc(x/sqrt(4t) + Bi sqrt(t)), in the
+    erfcx form that does not overflow at large Bi."""
+    from scipy.special import erfcx
+    return np.exp(-x**2 / (4 * t)) * erfcx(x / np.sqrt(4 * t) + Bi * np.sqrt(t))
+
+
+def beck_short(x, t, Bi):
+    """Eq. 7a: semi-infinite solution, the insulated wall not yet felt."""
+    from scipy.special import erfc
+    return erfc(x / np.sqrt(4 * t)) - beck_U(x, t, Bi)
+
+
+def beck_intermediate(x, t, Bi):
+    """Eq. 9: Eq. 7a plus its mirror image in the insulated wall at x = 1."""
+    from scipy.special import erfc
+    return beck_short(x, t, Bi) + erfc((2 - x) / np.sqrt(4 * t)) - beck_U(2 - x, t, Bi)
+
+
+def beck_eigenvalues(Bi, m):
+    """First m roots of tan(beta) = Bi/beta (Eq. 13), solved as
+    beta sin(beta) - Bi cos(beta) = 0 so there is no tan pole; the m-th root
+    lies in [(m-1) pi, (m-1) pi + pi/2], where that function changes sign."""
+    from scipy.optimize import brentq
+    f = lambda b: b * np.sin(b) - Bi * np.cos(b)
+    return np.array([brentq(f, k * np.pi, k * np.pi + np.pi / 2) for k in range(m)])
+
+
+def beck_long(x, t, Bi, m_max):
+    """Eq. 12a: eigenfunction series truncated at m_max terms."""
+    b = beck_eigenvalues(Bi, m_max)[:, None]
+    x, t = np.broadcast_arrays(np.asarray(x, float), np.asarray(t, float))
+    shape = x.shape
+    x, t = x.ravel()[None, :], t.ravel()[None, :]
+    terms = ((b**2 + Bi**2) * np.cos(b * (1 - x)) * np.cos(b)
+             / (b**2 * (b**2 + Bi**2 + Bi)) * np.exp(-b**2 * t))
+    return (1 - 2 * Bi * terms.sum(axis=0)).reshape(shape)
+
+
+def beck_windows(x, A):
+    """Times at which the short (Eq. 6) and intermediate (Eq. 8) forms stop
+    being accurate to 10^-A; the long-time series takes over after the second
+    (Eq. 11). At x = 0 the two coincide and there is no intermediate window."""
+    return 0.12 * (2 - x)**2 / A, 0.12 * (2 + x)**2 / A
+
+
+def beck_m_max(t, A):
+    """Eq. 14: series terms needed for 10^-A accuracy at times >= t, rounded
+    rather than floored as in the report's own fdX32B10T0.m -- the floor of
+    Eq. 14 keeps only 2 terms at x = 1 and misses 10^-6 by an order of
+    magnitude against the report's tables."""
+    return max(1, int(0.5 + np.sqrt(A * np.log(10) / t) / np.pi))
 
 
 def e_folding_time(t, dT, p):
@@ -647,26 +749,11 @@ def main():
     savefig(fig, "finite_vs_infinite.png")
 
     # -----------------------------------------------------------------
-    # CHECK 9 + FIGURE: energy conservation. The bottom is insulated, so
-    # the change in total heat content must equal the time-integrated
-    # surface flux:  c*T0 + rho_cp*Int(theta dz) - 0  ==  Int(F0-lam*T0)dt.
-    # We use the discretely-conserved heat functional (slab + dz-weighted
-    # interior + half-weighted bottom node, matching the finite-volume
-    # reading of the stencil) so this check isolates TIME-integration
-    # error rather than O(dz) bookkeeping noise.
+    # CHECK 9 + FIGURE: energy conservation for four diffusive timescales,
+    # plotted as the surface step response and depth-time evolution
+    # (see energy_budget_figure).
     # -----------------------------------------------------------------
-    section("CHECK 9: energy conservation + heat partition (k = 1 and k = 2)")
-    r = runs["110 m + k = 1 cm$^2$/s"]
-    pp, dz, th = r["p"], r["dz"], r["theta"]
-    H = (pp.c_ml * th[0]                                  # slab
-         + pp.rho_cp * dz * th[1:-1].sum(axis=0)          # interior cells
-         + pp.rho_cp * (dz / 2.0) * th[-1])               # half-width bottom cell
-    F_net = pp.F0 - pp.lam * th[0]
-    F_int = np.concatenate([[0.0], cumulative_trapezoid(F_net, r["t"])])
-    resid = np.abs((H - H[0]) - F_int)
-    rel_err = resid.max() / F_int[-1]
-    check(f"max |dH - Int(F dt)| / Int(F dt) = {rel_err:.2e}", rel_err < 5e-3,
-          "tol 0.5%; violation would mean flux/capacity bookkeeping is inconsistent")
+    energy_budget_figure(p)
 
     # Physical probe: where did the heat go? The fraction stored below the
     # mixed layer is exactly why the dotted Fig. 16 curves are slower.
@@ -677,19 +764,6 @@ def main():
         H_therm = ppp.rho_cp * (ddz * tth[1:-1].sum() + (ddz / 2) * tth[-1])
         print(f"  heat stored at 35 yr [{name}]: "
               f"{100 * H_therm / (H_slab + H_therm):.0f}% is below the mixed layer")
-
-    fig, ax = plt.subplots(figsize=(7, 4.5))
-    ax.plot(r["t"] / YEAR, (H - H[0]) / 1e9, color=C_BLUE, lw=2,
-            label="column heat content change")
-    ax.plot(r["t"] / YEAR, F_int / 1e9, color="k", lw=1.2, ls="--",
-            label="time-integrated surface flux")
-    ax.set(xlabel="Years", ylabel="Energy (GJ m$^{-2}$)",
-           title="Energy conservation: the two curves must coincide\n"
-                 "(insulated bottom, k = 1 run)")
-    style_axes(ax)
-    ax.legend(frameon=False, fontsize=9, loc="upper left")
-    fig.tight_layout()
-    savefig(fig, "energy_budget.png")
 
     # -----------------------------------------------------------------
     # CHECK 10: bottom boundary condition. The floor at z_max is a CLOSED,
@@ -753,7 +827,682 @@ def main():
         bounded = np.all(rr["dT"] <= rr["p"].dT_eq * (1 + 1e-9))
         check(f"{name}: monotone={mono}, bounded={bounded}", mono and bounded)
 
-    section("DONE — figures saved in ./" + OUTDIR)
+    # -----------------------------------------------------------------
+    # CHECK 13 + FIGURE: depth profile vs Held's exact h(zeta, tau) for the
+    # purely diffusive ocean. The analytic case has no slab, so the slab is
+    # shrunk to h_ml = dz/2 -- exactly the half-cell the surface node owns in
+    # the finite-volume reading of the stencil -- and the domain is made
+    # semi-infinite so the floor is never felt.
+    # -----------------------------------------------------------------
+    section("CHECK 13: depth profile vs analytic h(zeta, tau) (no slab, semi-infinite)")
+    pd = replace(p, h_ml=p.z_max / (p.Nz - 1) / 2, semi_infinite=True)
+    T_diff = (pd.D / pd.lam)**2 / pd.kappa                 # diffusive timescale [s]
+    taus = [0.25, 1.0, 4.0]
+    rd = solve_model(replace(pd, t_final=taus[-1] * T_diff), t_eval=[tau * T_diff for tau in taus])
+    ana = analytic_diffusive_profile(rd["z"][:, None], rd["t"][None, :], rd["p"])
+    err = np.max(np.abs(rd["theta"] - ana))
+    check(f"max |numeric - analytic| over z and tau = {taus} is {err:.2e} C "
+          f"(T = {T_diff / YEAR:.0f} yr)", err < 1e-2 * p.dT_eq, "tol 1% of dT_eq")
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    for i, (tau, c) in enumerate(zip(taus, [C_BLUE, C_VERM, C_GREEN])):
+        ax.plot(rd["theta"][:, i], rd["z"], color=c, lw=2, label=rf"numeric, $\tau$ = {tau:g}")
+        ax.plot(ana[:, i], rd["z"], color="k", lw=1.2, ls="--")
+    # Held's length scale H = D/V_beta with V_beta = beta/(rho c); in this
+    # module's units (D = rho_cp*kappa) that is D/lam. kappa and lam are the
+    # same for all three taus, so it is one line.
+    H_held = rd["p"].D / rd["p"].lam
+    ax.axhline(H_held, color="k", lw=1.2, ls=":",
+               label=rf"$\mathcal{{H}} = \mathcal{{D}}/\mathcal{{V}}_\beta$ = {H_held:.0f} m")
+    ax.set_ylim(p.z_max, 0)
+    ax.set(xlabel=r"$\theta$ anomaly ($\degree$C)", ylabel="Depth z (m)",
+           title=r"Depth profile vs analytic $h(\zeta, \tau)$ (dashed)" + "\n"
+                 r"purely diffusive, k = 1 cm$^2$/s")
+    style_axes(ax)
+    ax.legend(frameon=False, fontsize=9, loc="lower right")
+    fig.tight_layout()
+    savefig(fig, "depth_profile_vs_analytic.png")
+
+    # -----------------------------------------------------------------
+    # CHECK 14 + FIGURE: at tau = 1, how far does each model mode sit from
+    # the no-slab analytic profile? Only the no-slab semi-infinite run should
+    # match; the 110 m runs are diagnostics of what the slab and floor change.
+    # -----------------------------------------------------------------
+    section("CHECK 14: tau = 1 profile, analytic vs slab/floor modes")
+    t1 = T_diff                                            # tau = 1
+    modes = {
+        "no slab, semi-infinite":    (pd, C_BLUE),
+        "110 m slab, semi-infinite": (replace(p, semi_infinite=True), C_VERM),
+        "110 m slab, 2500 m floor":  (p, C_GREEN),
+    }
+    fig, ax = plt.subplots(figsize=(6, 6))
+    for name, (pm, c) in modes.items():
+        rm = solve_model(replace(pm, t_final=t1), t_eval=[t1])
+        ana1 = analytic_diffusive_profile(rm["z"], t1, rm["p"])
+        print(f"  {name}: max |numeric - analytic| = {np.max(np.abs(rm['theta'][:, 0] - ana1)):.2e} C, "
+              f"surface {rm['theta'][0, 0]:.3f} vs {ana1[0]:.3f} C")
+        ax.plot(rm["theta"][:, 0], rm["z"], color=c, lw=2, label=name)
+    ax.plot(ana1, rm["z"], color="k", lw=1.2, ls="--", label=r"analytic $h(\zeta, 1)$")
+    ax.set_ylim(p.z_max, 0)
+    ax.set(xlabel=r"$\theta$ anomaly ($\degree$C)", ylabel="Depth z (m)",
+           title=rf"Depth profile at $\tau$ = 1 ({t1 / YEAR:.0f} yr), k = 1 cm$^2$/s")
+    style_axes(ax)
+    ax.legend(frameon=False, fontsize=9, loc="lower right")
+    fig.tight_layout()
+    savefig(fig, "depth_profile_tau1_modes.png")
+
+    beck_slab_figure(p)
+    held_wmghg_figure(p)
+    held_linear_figure(p)
+
+    section(f"DONE — figures saved in {OUTDIR}")
+
+
+BECK_A = 6                       # beck_slab_figure: windows/terms for 10^-A accuracy
+BECK_BIS = [0.1, 1.0, 10.0]      # Biot numbers tabulated in the X32B10T0 report
+# Dash for the semi-infinite numeric band: in units of its 4-pt line width, so
+# short enough that the gaps also show in the legend sample.
+BECK_SEMI_DASH = (0, (2, 1.5))
+BECK_DEPTHS = [(0.0, C_BLUE), (0.5, C_GREEN), (1.0, C_PINK)]   # subset of the table's x = 0, .25, ..., 1
+BECK_TABLE_X = [0.0, 0.25, 0.5, 0.75, 1.0]                       # data/X32B10T0_tables.txt columns 2..6
+
+
+def beck_slab_figure(p):
+    """Closed column vs the exact X32B10T0 slab solution (Beck & Woodbury 2013,
+    Exact Analytical Conduction Toolbox): a slab 0 < x < L heated by convection
+    from a fluid at T_f through x = 0 and insulated at x = L. With the slab
+    shrunk to h_ml = dz/2 that is exactly this model -- k = D, h_1 = lam,
+    T_f = F0/lam = dT_eq, L = z_max -- so Bi = lam*z_max/D = z_max/H,
+    x = z/z_max, t = kappa*t/z_max^2 and T = theta/dT_eq. Bi is set by kappa at
+    fixed lam and z_max, so all three runs share the grid, and x = 0, .25, ...
+    fall on nodes.
+
+    Each of the report's short-, intermediate- and long-time forms is drawn
+    over the whole t range, with ticks where its 10^-A window ends; the
+    report's tabulated values (data/X32B10T0_tables.txt) are overlaid as a
+    check on the formulas.
+
+    The same runs with the floor removed (semi_infinite=True, so solve_model
+    deepens the column until it is never felt) are drawn dashed. They must
+    follow the closed column until the wall is felt, then fall below it, and
+    track the short-time form -- the exact semi-infinite solution -- at every t.
+    Dimensionless x and t keep L = z_max = 2500 m for both.
+    """
+    section("FIGURE: beck_X32B10T0_comparison.png (closed column vs exact slab solution)")
+    table = np.loadtxt("data/X32B10T0_tables.txt", skiprows=1)
+    dz = p.z_max / (p.Nz - 1)
+    t = np.linspace(0.0, 1.0, 401)[1:]                     # dimensionless; forms are singular at 0
+    fig, axes = plt.subplots(1, len(BECK_BIS), figsize=(15, 5.5))
+    for ax, Bi in zip(axes, BECK_BIS):
+        kappa = p.lam * p.z_max / (p.rho_cp * Bi)
+        T_slab = p.z_max**2 / kappa                        # t = 1 [s]
+        rb = solve_model(replace(p, kappa=kappa, h_ml=dz / 2, t_final=T_slab), t_eval=t * T_slab)
+        rs = solve_model(replace(p, kappa=kappa, h_ml=dz / 2, t_final=T_slab, semi_infinite=True),
+                         t_eval=t * T_slab)
+        tab = table[np.isclose(table[:, 0], Bi)]
+        print(f"  Bi = {Bi:g}: kappa = {kappa / CM2S_TO_M2S:.3g} cm^2/s, t = 1 is {T_slab / YEAR:.0f} yr; "
+              f"semi-infinite column z_max = {rs['p'].z_max:.0f} m")
+        err_tab, err_num, err_semi = {}, {}, 0.0
+        for x, c in BECK_DEPTHS:
+            j = BECK_TABLE_X.index(x)
+            num = rb["theta"][round(x * (p.Nz - 1))] / p.dT_eq
+            t_short, t_int = beck_windows(x, BECK_A)
+            m_max = beck_m_max(t_int, BECK_A)
+            forms = {
+                "short":        (lambda tt: beck_short(x, tt, Bi), "--", (0, t_short)),
+                "intermediate": (lambda tt: beck_intermediate(x, tt, Bi), ":", (t_short, t_int)),
+                "long":         (lambda tt: beck_long(x, tt, Bi, m_max), "-.", (t_int, np.inf)),
+            }
+            # The deepened grid keeps dz, but index by depth rather than assume it.
+            num_semi = rs["theta"][np.argmin(np.abs(rs["z"] - x * p.z_max))] / p.dT_eq
+            err_semi = max(err_semi, np.max(np.abs(num_semi - beck_short(x, t, Bi))))
+            ax.plot(t, num, color=c, lw=4, alpha=0.35)     # band, so the forms on top stay visible
+            ax.plot(t, num_semi, color=c, lw=4, alpha=0.35, ls=BECK_SEMI_DASH)
+            for name, (form, ls, (lo, hi)) in forms.items():
+                ax.plot(t, form(t), color=c, lw=1, ls=ls)
+                # Diagnostics inside the window only (empty at x = 0 for "intermediate")
+                inn, inn_tab = (t >= lo) & (t < hi), (tab[:, 1] >= lo) & (tab[:, 1] < hi)
+                if inn.any():
+                    err_num[name] = max(err_num.get(name, 0), np.max(np.abs(num - form(t))[inn]))
+                if inn_tab.any():
+                    err_tab[name] = max(err_tab.get(name, 0), np.max(np.abs(
+                        form(tab[inn_tab, 1]) - tab[inn_tab, 2 + j])))
+            ends = [te for te in (t_short, t_int) if te <= 1]
+            ax.plot(ends, np.interp(ends, t, num), ls="none", marker="|", ms=12, mew=2, color=c)
+            ax.plot(tab[:, 1], tab[:, 2 + j], ls="none", marker="o", ms=4, mfc="none", mec=c)
+        for name in forms:
+            print(f"    {name:<13} in window: max|analytic - table| = {err_tab.get(name, np.nan):.1e}, "
+                  f"max|numeric - analytic| = {err_num[name]:.1e}")
+        print(f"    semi-infinite numeric vs short-time form, all t: max diff = {err_semi:.1e}")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1.1 * rb["theta"].max() / p.dT_eq)
+        ax.set(xlabel=r"$\tilde t = \kappa t / z_{max}^2$",
+               title=rf"Bi = {Bi:g}  ($\kappa$ = {kappa / CM2S_TO_M2S:.3g} cm$^2$/s, "
+                     rf"$\tilde t$ = 1 is {T_slab / YEAR:.0f} yr)")
+        style_axes(ax)
+    axes[0].set_ylabel(r"$\tilde T = \theta / \Delta T_{eq}$")
+
+    from matplotlib.lines import Line2D
+    handles = [Line2D([], [], color=c, lw=2, label=rf"$\tilde x$ = {x:g}") for x, c in BECK_DEPTHS]
+    handles += [
+        Line2D([], [], color="k", lw=4, alpha=0.35, label=f"numeric, closed {p.z_max:.0f} m floor"),
+        Line2D([], [], color="k", lw=4, alpha=0.35, ls=BECK_SEMI_DASH, label="numeric, semi-infinite"),
+        Line2D([], [], color="k", lw=1, ls="--", label="short-time (Eq. 7a)"),
+        Line2D([], [], color="k", lw=1, ls=":", label="intermediate (Eq. 9)"),
+        Line2D([], [], color="k", lw=1, ls="-.", label="long-time series (Eq. 12a)"),
+        Line2D([], [], color="k", ls="none", marker="|", ms=12, mew=2,
+               label=rf"window ends ($10^{{-{BECK_A}}}$)"),
+        Line2D([], [], color="k", ls="none", marker="o", ms=4, mfc="none", label="report table"),
+    ]
+    fig.legend(handles=handles, loc="lower center", ncol=6, frameon=False, fontsize=9)
+    fig.suptitle("Numerical vs exact slab solution (Beck & Woodbury 2013, X32B10T0)")
+    fig.tight_layout(rect=(0, 0.1, 1, 1))
+    savefig(fig, "beck_X32B10T0_comparison.png")
+
+
+HELD_TAU_MAX = 100.0   # held_wmghg_figure: last fixed-tau profile slice
+HELD_SCALES = [(5, C_VERM), (80, C_GREEN), (200, C_BLUE), (1200, C_PINK), (10000, C_ORANGE)]
+LINEAR_PROFILE_TAUS = [5.0, 10.0, 20.0]       # held_linear_figure (c); within the T = 5 yr run's range
+
+
+def held_params(p, scale, t_final, z_floor=None):
+    """Purely diffusive ocean with diffusive timescale T = scale [yr].
+
+    T = rho_cp^2 kappa / lam^2 is set by kappa at fixed lam, so H = D/lam and
+    the penetration depth sqrt(kappa t) both grow with T. The slab is shrunk
+    to h_ml = dz/2 (the surface node's half-cell), and dz resolves the smaller
+    of H and sqrt(kappa t_final). z_floor=None places the insulated bottom deep
+    enough to be semi-infinite; otherwise it is a closed floor at z_floor [m].
+    """
+    kappa = scale * YEAR * p.lam**2 / p.rho_cp**2
+    L = np.sqrt(kappa * t_final)                         # diffusion length at t_final
+    z_max = SEMI_INF_PAD * 2 * L if z_floor is None else z_floor
+    Nz = int(np.ceil(z_max / (min(p.rho_cp * kappa / p.lam, L, z_max) / 40))) + 1
+    return replace(p, kappa=kappa, h_ml=z_max / (Nz - 1) / 2, z_max=z_max, Nz=Nz,
+                   t_final=t_final)
+
+
+def energy_budget_figure(p):
+    """CHECK 9 + FIGURE relaxation_time_check.png: energy conservation, the
+    surface step response, and the depth-time evolution of theta.
+
+    Purely diffusive ocean (slab h_ml = dz/2, deep enough to be semi-infinite)
+    under a step forcing F = F2X switched on at t = 0, for four diffusive
+    timescales T = rho_cp^2 kappa / lam^2: kappa varies, while lam = F0/dT_eq
+    and the step are the same for every run. Each run gets its own grid, sized as in
+    held_wmghg_figure.
+
+    The bottom is insulated, so the change in column heat content must equal
+    the time-integrated surface flux:  rho_cp*Int(theta dz) == Int(F - lam*T0)dt.
+    The heat functional is the discretely-conserved one (half-width surface
+    and bottom cells, dz-weighted interior), so the check isolates
+    TIME-integration error rather than O(dz) bookkeeping noise.
+
+    The checks also grade depth profiles at fixed tau = t/T (0.25, 1, 4),
+    from separate runs long enough to reach tau for each T: with no slab and
+    a semi-infinite ocean theta depends only on (z/H, t/T), so they must
+    match Held's h(zeta, tau).
+
+    Figure: (a) surface theta vs tau on a linear axis, a single curve with
+    each run covering its own tau range, against the analytic h(0, tau);
+    (b) one panel per run of every profile theta(zeta = z/H), coloured by tau,
+    which must collapse across runs; (c) isotherms: the depth zeta reached by
+    fixed theta levels vs tau, numeric (from (b)'s run) against Held's
+    h(zeta, tau) (dashed).
+    """
+    section("CHECK 9: energy conservation vs depth (no slab, semi-infinite, step forcing F2X, 4 timescales)")
+    forcing = lambda t: np.full_like(t, F2X, dtype=float)
+    t_final = 500.0 * YEAR
+    taus = [0.25, 1.0, 4.0]
+    # Log spacing resolves the sqrt(t) surface jump at early times (it sets
+    # the trapezoid error in Int(F dt)); linear spacing covers late times.
+    t_eval = np.unique(np.concatenate([
+        [0.0], np.geomspace(1e-3, t_final / YEAR, 300), np.linspace(0.0, t_final / YEAR, 300)])) * YEAR
+
+    runs = []
+    for scale, c in HELD_SCALES[:4]:
+        r = solve_model(replace(held_params(p, scale, t_final), forcing=forcing), t_eval=t_eval)
+        th, dz, kappa, Nz = r["theta"], r["dz"], r["p"].kappa, r["p"].Nz
+        H = p.rho_cp * dz * (th[0] / 2 + th[1:-1].sum(axis=0) + th[-1] / 2)
+        F_int = np.concatenate([[0.0], cumulative_trapezoid(forcing(r["t"]) - p.lam * th[0], r["t"])])
+        rel_err = np.abs(H - F_int).max() / F_int[-1]
+        check(f"T = {scale:4d} yr (kappa = {kappa / CM2S_TO_M2S:6.2f} cm^2/s, Nz = {Nz}): "
+              f"max |dH - Int(F dt)| / Int(F dt) = {rel_err:.2e}", rel_err < 5e-3,
+              "tol 0.5%; violation would mean flux/capacity bookkeeping is inconsistent")
+        # Profiles at fixed tau: t = tau*T runs past t_final for the slow runs.
+        T_s = scale * YEAR
+        rs = solve_model(replace(held_params(p, scale, taus[-1] * T_s), forcing=forcing),
+                         t_eval=[tau * T_s for tau in taus])
+        ana = F2X / p.F0 * analytic_diffusive_profile(rs["z"][:, None], rs["t"][None, :], rs["p"])
+        err = np.max(np.abs(rs["theta"] - ana))
+        check(f"  profiles at tau = {taus}: max |numeric - analytic| = {err:.2e} C",
+              err < 1e-2 * F2X / p.lam, "tol 1% of F2X/lam")
+        runs.append((r, H, F_int, kappa, c, scale, rs))
+
+    # (a) surface theta vs tau on a linear axis, every run over its own tau
+    # range up to TAU_MAX. The runs overlap in tau, so earlier ones are drawn
+    # wider to stay visible. Analytic: the surface (zeta = 0) step response,
+    # (F/lam) h(0, tau) = (F/lam)(1 - e^tau erfc(sqrt(tau))).
+    # (b) every profile theta(zeta) up to TAU_MAX, coloured by tau. With no
+    # slab and a semi-infinite ocean theta depends only on (zeta, tau), so one
+    # run stands for all of them: the fastest, rerun to exactly TAU_MAX with
+    # output at each integer tau. Integer tau is marked in red in both panels
+    # and on the colorbar.
+    TAU_MAX = 10.0
+    tau_int = np.arange(1.0, TAU_MAX + 1)
+    th_eq = F2X / p.lam
+    pr = runs[0][-1]["p"]
+    H_ref = pr.D / pr.lam
+    tau_line = np.linspace(1e-6, TAU_MAX, 400)          # tau = 0 is 0/0 at zeta = 0
+    analytic = lambda tau: F2X / p.F0 * analytic_diffusive_profile(0.0, tau * H_ref**2 / pr.kappa, pr)
+
+    scale_b = runs[0][5]
+    T_b = scale_b * YEAR
+    tau_b = np.unique(np.concatenate([np.linspace(0.0, TAU_MAX, 401), tau_int]))
+    rb = solve_model(replace(held_params(p, scale_b, TAU_MAX * T_b), forcing=forcing), t_eval=tau_b * T_b)
+    zeta_b = rb["z"] / (rb["p"].D / rb["p"].lam)
+
+    fig = plt.figure(figsize=(12, 15.5))
+    gs = fig.add_gridspec(3, 2, height_ratios=[1.0, 1.2, 1.0], width_ratios=[1.0, 0.025])
+    ax = fig.add_subplot(gs[0, 0])
+    for (r, H, F_int, kappa, c, scale, rs), lw in zip(runs, [7, 5, 3.5, 2]):
+        zH = r["p"].D / r["p"].lam
+        tau_r = r["t"] / (scale * YEAR)
+        keep = tau_r <= TAU_MAX
+        ax.plot(tau_r[keep], r["dT"][keep], color=c, lw=lw, solid_capstyle="butt",
+                label=rf"$\mathcal{{T}}$ = {scale} yr, $\mathcal{{H}}$ = {zH:.0f} m")
+    ax.plot(tau_line, analytic(tau_line), color="k", lw=1, ls="--", label=r"analytic, $h(0, \tau)$")
+    for tau in tau_int:
+        ax.axvline(tau, color="r", lw=0.8, alpha=0.7, zorder=0)
+    ax.plot([], [], color="r", lw=0.8, label=r"integer $\tau$")
+    ax.axhline(th_eq, color="0.6", lw=0.8, ls=":")
+    ax.set(xlim=(0, TAU_MAX), ylim=(0, 1.05 * th_eq), xlabel=r"$\tau = t/\mathcal{T}$",
+           ylabel=r"surface $\theta$ anomaly ($\degree$C)",
+           title=rf"(a) surface step response, F = F$_{{2x}}$, "
+                 rf"$F/\lambda$ = {th_eq:.2f} $\degree$C (no slab, semi-infinite)")
+    ax.legend(frameon=False, fontsize=9, loc="lower right")
+    style_axes(ax)
+
+    ax_p = fig.add_subplot(gs[1, 0])
+    segments = [np.column_stack([rb["theta"][:, j], zeta_b]) for j in range(tau_b.size)]
+    lc = LineCollection(segments, cmap="viridis", norm=plt.Normalize(0.0, TAU_MAX),
+                        array=tau_b, linewidths=1.2)
+    ax_p.add_collection(lc)
+    j_int = np.searchsorted(tau_b, tau_int)
+    for j in j_int:
+        ax_p.plot(rb["theta"][:, j], zeta_b, color="r", lw=1.2)
+    ax_p.set_xlim(-0.02 * th_eq, 1.05 * th_eq)
+    ax_p.set_ylim(4 * np.sqrt(TAU_MAX), 0)              # depth increases downward
+    ax_p.set(xlabel=r"$\theta$ anomaly ($\degree$C)", ylabel=r"$\zeta = z/\mathcal{H}$")
+    ax_p.set_title(rf"(b) depth-time evolution, the same for every $\mathcal{{T}}$ "
+                   rf"(computed with $\mathcal{{T}}$ = {scale_b} yr); red: integer $\tau$")
+    style_axes(ax_p)
+    cbar = fig.colorbar(lc, cax=fig.add_subplot(gs[1, 1]))
+    cbar.ax.hlines(tau_int, 0, 1, color="r", lw=1.2)
+    cbar.set_label(r"$\tau = t/\mathcal{T}$")
+
+    # (c) isotherms zeta(tau) at fixed theta: theta decreases monotonically with
+    # depth, so each level is a single curve that deepens with tau.
+    ax_c = fig.add_subplot(gs[2, 0])
+    th_levels = [0.1, 0.5, 1.0, 1.5, 2.0, 2.5]
+    th_colors = plt.cm.plasma(np.linspace(0.0, 0.85, len(th_levels)))
+    zeta_max = 4 * np.sqrt(TAU_MAX)
+    ax_c.contour(tau_b, zeta_b, rb["theta"], levels=th_levels, colors=th_colors, linewidths=2.5)
+    zz = np.linspace(0.0, zeta_max, 300)
+    tt = np.linspace(1e-6, TAU_MAX, 401)
+    th_ana = F2X / p.F0 * analytic_diffusive_profile(zz[:, None] * H_ref, tt[None, :] * H_ref**2 / pr.kappa, pr)
+    ax_c.contour(tt, zz, th_ana, levels=th_levels, colors="k", linewidths=1, linestyles="--")
+    for th, c in zip(th_levels, th_colors):
+        ax_c.plot([], [], color=c, lw=2.5, label=rf"$\theta$ = {th:g} $\degree$C")
+    ax_c.plot([], [], color="k", lw=1, ls="--", label=r"analytic, $h(\zeta, \tau)$")
+    # z = V_beta t with V_beta = lam/rho_cp: H = kappa/V_beta and T = kappa/V_beta^2,
+    # so in (zeta, tau) it is zeta = tau.
+    ax_c.plot([0, TAU_MAX], [0, TAU_MAX], color="0.45", lw=1.5, ls=":",
+              label=r"$z = \mathcal{V}_\beta t$, i.e. $\zeta = \tau$")
+    ax_c.set(xlim=(0, TAU_MAX), ylim=(zeta_max, 0), xlabel=r"$\tau = t/\mathcal{T}$",
+             ylabel=r"$\zeta = z/\mathcal{H}$",
+             title=rf"(c) isotherms: depth reached by fixed $\theta$ (computed with $\mathcal{{T}}$ = {scale_b} yr)")
+    ax_c.legend(frameon=False, fontsize=9, loc="lower left", ncol=2)
+    style_axes(ax_c)
+    fig.tight_layout(h_pad=3)
+    savefig(fig, "relaxation_time_check.png")
+
+
+def held_wmghg_figure(p):
+    """CHECK 15 + FIGURE: numerical recreation of figures/held_wmghg_response.png.
+
+    Purely diffusive ocean (slab h_ml = dz/2, deep enough to be semi-infinite)
+    driven by the WMGHG forcing of data/forcing_1850_2100.txt from 1850.
+    The timescale T = rho_cp^2 kappa / lam^2 is set by kappa at fixed lam, so
+    H = D/lam and the penetration depth both grow with T; each run gets its
+    own grid (dz resolves the smaller of H and sqrt(kappa t)). The check is
+    graded in units of the TCR, the response at yr 70 of a linear ramp
+    reaching F2X there, as in held_exact_vs_approx.py; the panels plot
+    temperature divided by T.
+
+    held_wmghg_response_numeric_tcr.png repeats the semi-infinite runs the
+    original way: temperature/TCR on linear axes, and (c) profiles of theta/TCR at fixed
+    calendar years.
+
+    The depth profiles (c) are at fixed tau = t/T up to HELD_TAU_MAX, each
+    from a separate run to tau_max*T on a grid refined for the smallest tau.
+    Those runs outlast the data, so their forcing is linearly extrapolated
+    past 2100 (least-squares slope of the last 20 yr, continued from the 2100
+    value). (a) and (b) show only 1850-2100, with no extrapolation, and dot
+    only the slices that fall in it.
+    """
+    section("CHECK 15: WMGHG historical response, numeric vs analytic (no slab, semi-infinite)")
+    yr, F_ghg = np.loadtxt("data/forcing_1850_2100.txt", skiprows=1, usecols=(0, 3), unpack=True)
+    t_knots = (yr - yr[0]) * YEAR
+    ramp_knots = np.array([0.0, T_2X]), np.array([0.0, F2X])
+    plot_yrs = yr
+    t_final = (plot_yrs[-1] - yr[0]) * YEAR
+
+    # Profile runs only: np.interp holds the 2100 value, so adding the slope
+    # past t_knots[-1] continues the forcing linearly from there.
+    slope = np.polyfit(yr[-20:], F_ghg[-20:], 1)[0] / YEAR
+    forcing_ext = lambda t: np.interp(t, t_knots, F_ghg) + slope * max(t - t_knots[-1], 0.0)
+
+    scales = [(20, C_VERM), (80, C_GREEN), (200, C_BLUE)]
+    profile_taus = np.geomspace(0.05, HELD_TAU_MAX, 5)
+    print(f"  profile runs: WMGHG forcing extrapolated past {yr[-1]:.0f} at {slope * YEAR:.4f} W/m^2/yr, "
+          f"to {yr[0] + HELD_TAU_MAX * scales[-1][0]:.0f} "
+          f"(F = {forcing_ext(HELD_TAU_MAX * scales[-1][0] * YEAR):.1f} W/m^2)")
+    # _tcr figure: more timescales, so 20 yr takes the orange freed by 10000 yr.
+    tcr_scales = [(5, C_VERM), (20, C_ORANGE), (80, C_GREEN), (200, C_BLUE), (1200, C_PINK)]
+    profile_yrs = [1900, 1950, 2000, 2050, 2100]
+
+    def solve_runs(run_scales, z_floor=None, profiles=True):
+        """One run per timescale. z_floor=None: deep enough to be semi-infinite,
+        graded against the analytic solution. Otherwise a closed, insulated
+        floor at z_floor [m]; the semi-infinite analytic curve is then only a
+        reference, so the difference is printed, not graded. profiles=False
+        skips the fixed-tau profile runs (rs = None)."""
+        runs = []
+        for scale, c in run_scales:
+            ph = replace(held_params(p, scale, t_final, z_floor),
+                         forcing=lambda t: np.interp(t, t_knots, F_ghg))
+            kappa, Nz = ph.kappa, ph.Nz
+
+            r = solve_model(ph, t_eval=(plot_yrs - yr[0]) * YEAR)
+            tcr = solve_model(replace(ph, forcing=lambda t: np.interp(t, *ramp_knots),
+                                      t_final=70.0 * YEAR), t_eval=[70.0 * YEAR])["dT"][0]
+            ana = analytic_diffusive_surface(r["t"], t_knots, F_ghg, ph)
+            tcr_ana = analytic_diffusive_surface([70.0 * YEAR], *ramp_knots, ph)[0]
+            err = np.max(np.abs(r["dT"] / tcr - ana / tcr_ana))
+            label = (f"T = {scale:5d} yr (kappa = {kappa:.2e} m^2/s, Nz = {Nz}): "
+                     f"max |numeric - analytic| = {err:.2e} TCR, T/TCR in {plot_yrs[-1]:.0f} = {r['dT'][-1] / tcr:.3f}")
+            if z_floor is None:
+                check(label, err < 1e-2, "tol 0.01 TCR")
+            else:
+                print(f"  {label}  (vs semi-infinite analytic)")
+
+            if not profiles:
+                runs.append((r, ana, tcr, tcr_ana, c, scale, None))
+                continue
+
+            # Fixed-tau profiles. Refine dz so the earliest slice's penetration
+            # depth sqrt(tau_min) H is resolved by ~40 cells. A floor deeper
+            # than the semi-infinite padding is never felt by tau_max, so the
+            # shallower padded domain stands in for it.
+            T_s = scale * YEAR
+            t_prof = profile_taus[-1] * T_s
+            felt = z_floor is not None and z_floor < SEMI_INF_PAD * 2 * np.sqrt(kappa * t_prof)
+            ps = held_params(p, scale, t_prof, z_floor if felt else None)
+            Nz_s = max(ps.Nz, int(np.ceil(ps.z_max / (np.sqrt(profile_taus[0] * kappa * T_s) / 40))) + 1)
+            ps = replace(ps, Nz=Nz_s, h_ml=ps.z_max / (Nz_s - 1) / 2, forcing=forcing_ext)
+            rs = solve_model(ps, t_eval=[tau * T_s for tau in profile_taus])
+
+            runs.append((r, ana, tcr, tcr_ana, c, scale, rs))
+        return runs
+
+    semi_inf = solve_runs(scales)
+    extra = solve_runs([sc for sc in tcr_scales if sc[0] not in dict(scales)], profiles=False)
+    print("  --- 2500 m insulated floor (diagnostic) ---")
+    floored = solve_runs(scales, z_floor=2500.0)
+    by_scale = {run[5]: run for run in semi_inf + extra}
+    tcr_runs = [by_scale[scale][:4] + (c, scale, None) for scale, c in tcr_scales]
+
+    # Panel (c) depth axes, one range per tau panel:
+    #   zeta = z/sqrt(kappa T) = z/H (Held's nondimensional depth). Every run
+    #     penetrates to zeta ~ sqrt(tau), so the range is the same for all.
+    #   z [m]. Penetration is ~sqrt(kappa tau T), so the slowest run sets the
+    #     range (or the floor, when there is one).
+    zeta = lambda r, scale: r["z"] / np.sqrt(r["p"].kappa * scale * YEAR)
+    z = lambda r, scale: r["z"]
+    z_pen = lambda tau: 4 * np.sqrt(semi_inf[-1][0]["p"].kappa * tau * scales[-1][0] * YEAR)
+    figures = [
+        (semi_inf, "semi-infinite", zeta, lambda tau: 4 * np.sqrt(tau),
+         r"$\zeta = z/\sqrt{\kappa \mathcal{T}}$", "held_wmghg_response_numeric.png"),
+        (semi_inf, "semi-infinite", z, z_pen,
+         "Depth z (m)", "held_wmghg_response_numeric_z.png"),
+        (floored, "2500 m floor", z, lambda tau: min(z_pen(tau), 2500.0),
+         "Depth z (m)", "held_wmghg_response_numeric_2500m.png"),
+    ]
+    # (a), (b): temperature divided by the run's diffusive timescale T [yr].
+    # T spans 20-200 yr, so the values span ~10x; symlog keeps the negative
+    # early response (WMGHG (Sm) forcing < 0 before ~1860) and the (c) slices,
+    # dotted at t = tau T, most of which fall before 1880.
+    # (c): theta/T [C/yr], linear: the early WMGHG (Sm) forcing is negative.
+    for runs, domain, depth, depth_max, ylabel, name in figures:
+        fig = plt.figure(figsize=(15, 9))
+        gs = fig.add_gridspec(2, len(profile_taus))
+        ax_a = fig.add_subplot(gs[0, :2])
+        ax_b = fig.add_subplot(gs[0, 2:])
+        for r, ana, _, _, c, scale, rs in runs:
+            ax_a.plot(plot_yrs, r["dT"] / scale, color=c, lw=2, label=f"{scale} yrs")
+            ax_b.plot(plot_yrs, r["dT"] / scale, color=c, lw=2, label=f"numeric, {scale} yrs")
+            ax_b.plot(plot_yrs, ana / scale, color="k", lw=1, ls="--")
+            t_dot = yr[0] + profile_taus * scale
+            shown = t_dot <= yr[-1]
+            for ax in (ax_a, ax_b):
+                ax.plot(t_dot[shown], rs["dT"][shown] / scale, "o",
+                        color=c, mec="k", mew=0.6, ms=6, zorder=3)
+        for ax in (ax_a, ax_b):
+            ax.plot([], [], "o", color="0.7", mec="k", mew=0.6, ms=6, label=r"(c) $\tau$ slices")
+
+        for i, tau in enumerate(profile_taus):
+            ax = fig.add_subplot(gs[1, i])
+            for *_, c, scale, rs in runs:
+                ax.plot(rs["theta"][:, i] / scale, depth(rs, scale), color=c, lw=1.5,
+                        label=f"{scale} yrs (t = {tau * scale:.3g} yr)")
+            ax.set_ylim(depth_max(tau), 0)
+            ax.xaxis.set_major_locator(plt.MaxNLocator(3))
+            ax.ticklabel_format(axis="x", style="sci", scilimits=(-2, 2))
+            ax.set(xlabel=r"$\theta / \mathcal{T}$ ($\degree$C yr$^{-1}$)",
+                   title=("(c) depth profiles, " if i == 0 else "") + rf"$\tau$ = {tau:.3g}")
+            if i == 0:
+                ax.set_ylabel(ylabel)
+                ax.legend(frameon=False, fontsize=7, loc="lower right")
+            style_axes(ax)
+
+        ab_ylabel = r"temperature/$\mathcal{T}$ ($\degree$C yr$^{-1}$)"
+        ax_a.set(xlabel="year", ylabel=ab_ylabel, xlim=(1845, yr[-1] + 5),
+                 title=f"(a) WMGHG response, numerical (no slab, {domain})")
+        ax_a.set_yscale("symlog", linthresh=1e-5)
+        ax_a.legend(frameon=False, fontsize=9, loc="center right")
+        ax_b.set(xlabel="year", ylabel=ab_ylabel, xlim=(1845, yr[-1] + 5),
+                 title="(b) numeric (solid) vs semi-infinite analytic (black dashed)")
+        ax_b.set_yscale("symlog", linthresh=1e-5)
+        ax_b.legend(frameon=False, fontsize=9, loc="center right")
+        for ax in (ax_a, ax_b):
+            style_axes(ax)
+        fig.tight_layout(h_pad=3)
+        savefig(fig, name)
+
+    # Semi-infinite runs for tcr_scales, normalized by the TCR on linear axes, with
+    # profiles at fixed calendar years. A profile penetrates to zeta ~
+    # sqrt(t/T), so the fastest run sets each panel's depth range.
+    fig = plt.figure(figsize=(15, 9))
+    gs = fig.add_gridspec(2, len(profile_yrs))
+    ax_a = fig.add_subplot(gs[0, :2])
+    ax_b = fig.add_subplot(gs[0, 2:])
+    prof_idx = np.searchsorted(plot_yrs, profile_yrs)
+    for r, ana, tcr, tcr_ana, c, scale, _ in tcr_runs:
+        ax_a.plot(plot_yrs, r["dT"] / tcr, color=c, lw=2, label=f"{scale} yrs")
+        ax_b.plot(plot_yrs, r["dT"] / tcr, color=c, lw=2, label=f"numeric, {scale} yrs")
+        ax_b.plot(plot_yrs, ana / tcr_ana, color="k", lw=1, ls="--")
+        for ax in (ax_a, ax_b):
+            ax.plot(plot_yrs[prof_idx], r["dT"][prof_idx] / tcr, "o",
+                    color=c, mec="k", mew=0.6, ms=6, zorder=3)
+    ax_a.plot(plot_yrs, np.interp(plot_yrs, yr, F_ghg) / F2X, "k", lw=1.5, label="forcing/F2X")
+    for ax in (ax_a, ax_b):
+        ax.plot([], [], "o", color="0.7", mec="k", mew=0.6, ms=6, label="(c) time slices")
+
+    theta_max = max(r["theta"][:, prof_idx].max() / tcr for r, _, tcr, *_ in tcr_runs)
+    for i, (y, j) in enumerate(zip(profile_yrs, prof_idx)):
+        ax = fig.add_subplot(gs[1, i])
+        for r, _, tcr, _, c, scale, _ in tcr_runs:
+            ax.plot(r["theta"][:, j] / tcr, zeta(r, scale), color=c, lw=1.5, label=f"{scale} yrs")
+        ax.set_ylim(4 * np.sqrt((y - yr[0]) / tcr_scales[0][0]), 0)
+        ax.set_xlim(-0.02 * theta_max, 1.05 * theta_max)
+        ax.set(xlabel=r"$\theta$/TCR", title=("(c) depth profiles, " if i == 0 else "") + str(y))
+        if i == 0:
+            ax.set_ylabel(r"$\zeta = z/\sqrt{\kappa \mathcal{T}}$")
+            ax.legend(frameon=False, fontsize=8, loc="lower right")
+        style_axes(ax)
+
+    ax_a.set(xlabel="year", ylabel="temperature/TCR", xlim=(1845, yr[-1] + 5),
+             title="(a) WMGHG response, numerical (no slab, semi-infinite)")
+    ax_b.set(xlabel="year", ylabel="temperature/TCR", xlim=(1845, yr[-1] + 5),
+             title="(b) numeric (solid) vs semi-infinite analytic (black dashed)")
+    for ax in (ax_a, ax_b):
+        ax.legend(frameon=False, fontsize=9, loc="upper left")
+        style_axes(ax)
+    fig.tight_layout(h_pad=3)
+    savefig(fig, "held_wmghg_response_numeric_tcr.png")
+
+
+
+def held_linear_figure(p):
+    """CHECK 16 + FIGURE: held_wmghg_response_numeric.png under a pure linear ramp.
+
+    Same purely diffusive, semi-infinite ocean and five timescales as
+    held_wmghg_figure, driven by F(t) = F2X * t/T_2X from t = 0: it reaches
+    F2X at yr 70 (the ramp that defines the TCR) and keeps rising at that
+    rate. Runs go to 100 yr.
+
+    Temperatures are plotted as theta/T [C/yr]. Since theta scales with the
+    ramp amplitude A_T = F2X*T/(lam*T_2X), theta/T = F2X/(lam*T_2X) * g(zeta,
+    tau), with g(zeta, tau) = Int_0^tau h(zeta, u) du the time-integral of
+    Held's step response h; every run must collapse onto it, each over its own
+    range of tau = t/T. The checks are done on theta/A_T = g directly.
+
+    (a) surface theta/T vs tau, numeric vs analytic;
+    (b) theta/T as a heatmap over tau and zeta, each run filling its own tau
+        range (later runs, i.e. smaller T and larger tau, drawn first), with
+        the analytic g(zeta, tau) as dashed contours. The check compares each
+        run's whole (zeta, tau) field with g.
+    (c) depth profiles at LINEAR_PROFILE_TAUS (dotted lines on (b)) vs g.
+    """
+    section("CHECK 16: linear-ramp response, numeric vs analytic (no slab, semi-infinite)")
+    t_final = 100.0 * YEAR
+    plot_yrs = np.arange(0.0, t_final / YEAR + 1)
+    ramp_knots = np.array([0.0, t_final]), np.array([0.0, F2X * t_final / T_2X])
+    forcing = lambda t: F2X * t / T_2X
+    j70 = np.searchsorted(plot_yrs, T_2X / YEAR)
+
+    def ramp_field(zeta, taus, n=4000):
+        """g(zeta, tau) = Int_0^tau h(zeta, u) du on the grid zeta x taus, by a
+        cumulative trapezoid on one log-graded u grid (h ~ sqrt(u) near the
+        surface) up to max(taus), interpolated to each tau. h is
+        analytic_diffusive_profile with dT_eq divided out."""
+        H, T = p.D / p.lam, (p.D / p.lam)**2 / p.kappa
+        taus = np.atleast_1d(taus)
+        u = np.concatenate([[0.0], np.geomspace(1e-8 * taus[taus > 0].min(), taus.max(), n)])
+        h = analytic_diffusive_profile(np.atleast_1d(zeta)[:, None] * H,
+                                       np.maximum(u, 1e-300)[None, :] * T, p) / p.dT_eq
+        g = cumulative_trapezoid(h, u, axis=1, initial=0.0)
+        return np.array([np.interp(taus, u, row) for row in g])
+
+    rate = F2X / (p.lam * T_2X / YEAR)            # theta/T = rate * g  [C/yr]
+
+    runs = []
+    for scale, c in HELD_SCALES:
+        T_s = scale * YEAR
+        A_T = F2X * T_s / (p.lam * T_2X)
+        ph = replace(held_params(p, scale, t_final), forcing=forcing)
+        r = solve_model(ph, t_eval=plot_yrs * YEAR)
+        ana = analytic_diffusive_surface(r["t"], *ramp_knots, ph)
+        tcr = r["dT"][j70]
+        err = np.max(np.abs(r["dT"] - ana)) / ana[j70]
+        check(f"T = {scale:5d} yr (kappa = {ph.kappa:.2e} m^2/s, Nz = {ph.Nz}): "
+              f"max |numeric - analytic| = {err:.2e} TCR, T/TCR at yr {t_final / YEAR:g} = {r['dT'][-1] / tcr:.3f}",
+              err < 1e-2, "tol 0.01 TCR")
+
+        # Whole (zeta, tau) field vs g, below the surface down to 6 sqrt(tau_max)
+        # (g there is < 1e-8 of its surface value), in units of the yr-70 surface value.
+        tau = plot_yrs / scale
+        zeta = r["z"] / (ph.D / ph.lam)
+        k = zeta <= 6 * np.sqrt(tau[-1])
+        g_err = np.abs(r["theta"][k] / A_T - ramp_field(zeta[k], tau))
+        check(f"  field over zeta <= {zeta[k][-1]:.2f}, tau <= {tau[-1]:g}: "
+              f"max |theta/A_T - g| = {g_err.max() * A_T / tcr:.2e} TCR", g_err.max() * A_T / tcr < 1e-2,
+              "tol 0.01 TCR")
+        runs.append((r, ana, c, scale, zeta, tau))
+
+    fig = plt.figure(figsize=(15, 9))
+    gs = fig.add_gridspec(2, len(HELD_SCALES))
+    ax_a = fig.add_subplot(gs[0, :])
+    # The runs overlap in tau on one curve, so earlier ones are drawn wider.
+    for (r, ana, c, scale, *_), lw in zip(runs, [8, 6, 4.5, 3, 1.5]):
+        tau = plot_yrs / scale
+        ax_a.plot(tau, r["dT"] / scale, color=c, lw=lw, solid_capstyle="butt", label=f"numeric, {scale} yrs")
+        ax_a.plot(tau, ana / scale, color="k", lw=1, ls="--")
+        ax_a.plot(T_2X / YEAR / scale, r["dT"][j70] / scale, "o", color=c, mec="k", mew=0.6, ms=6, zorder=3)
+    ax_a.plot([], [], color="k", lw=1, ls="--", label="semi-infinite analytic")
+    ax_a.plot([], [], "o", color="0.7", mec="k", mew=0.6, ms=6, label="yr 70: F = F$_{2x}$")
+    ax_a.set(xlim=(0, plot_yrs[-1] / HELD_SCALES[0][0]), ylim=(0, None),
+             xlabel=r"years since forcing onset / $\mathcal{T}$", ylabel=r"$\theta_0 / \mathcal{T}$ ($\degree$C yr$^{-1}$)",
+             title=f"(a) surface response to a linear ramp, F$_{{2x}}$ at yr 70 "
+                   f"({t_final / YEAR:g} yr runs; no slab, semi-infinite)")
+    ax_a.legend(frameon=False, fontsize=9, loc="upper left", ncol=2)
+    style_axes(ax_a)
+
+    # zeta = z/sqrt(kappa T) = z/H; theta/T = rate*g(zeta, tau) for every run,
+    # so the runs tile one field. Largest tau range first: the shorter-T runs'
+    # wider ranges are overdrawn at small tau by the longer-T runs.
+    ax_b = fig.add_subplot(gs[1, :-1])
+    tau_max = plot_yrs[-1] / HELD_SCALES[0][0]
+    zeta_max = 2 * np.sqrt(tau_max)
+    vmax = max(r["dT"].max() / scale for r, _, _, scale, *_ in runs)
+    for r, _, _, scale, zeta, tau in runs:
+        k = zeta <= 1.05 * zeta_max
+        pc = ax_b.pcolormesh(tau, zeta[k], r["theta"][k] / scale, shading="nearest",
+                             cmap="viridis", vmin=0.0, vmax=vmax)
+    tt = np.linspace(0.0, tau_max, 201)
+    zz = np.linspace(0.0, zeta_max, 121)
+    cs = ax_b.contour(tt, zz, rate * ramp_field(zz, tt), levels=np.linspace(0, vmax, 9)[1:-1],
+                      colors="k", linewidths=0.8, linestyles="--")
+    ax_b.clabel(cs, fmt="%.2f", fontsize=7)
+    ax_b.set(xlim=(0, tau_max), ylim=(zeta_max, 0), xlabel=r"$\tau = t/\mathcal{T}$",
+             ylabel=r"$\zeta = z/\sqrt{\kappa \mathcal{T}}$",
+             title=r"(b) $\theta/\mathcal{T}$: numeric (color, all runs) vs analytic (dashed contours)")
+    fig.colorbar(pc, ax=ax_b, pad=0.01, fraction=0.03,
+                 label=r"$\theta / \mathcal{T}$ ($\degree$C yr$^{-1}$)")
+    style_axes(ax_b)
+
+    # (c) depth profiles at the tau marked on (b), numeric from the T = 5 yr run
+    # (the only one reaching tau = 20) vs the analytic g (dashed).
+    ax_c = fig.add_subplot(gs[1, -1], sharey=ax_b)
+    r, _, _, scale, zeta, tau = runs[0]
+    for tau_c, c in zip(LINEAR_PROFILE_TAUS, ["#d62728", "#ff7f0e", "#e377c2"]):
+        j = np.argmin(np.abs(tau - tau_c))
+        ax_c.plot(r["theta"][:, j] / scale, zeta, color=c, lw=2.5, label=rf"$\tau$ = {tau_c:g}")
+        ax_c.plot(rate * ramp_field(zz, tau_c)[:, 0], zz, color="k", lw=1, ls="--")
+        ax_b.axvline(tau_c, color=c, lw=1.5, ls=":")
+    ax_c.plot([], [], color="k", lw=1, ls="--", label="analytic")
+    ax_c.set(xlim=(0, None), xlabel=r"$\theta / \mathcal{T}$ ($\degree$C yr$^{-1}$)",
+             title="(c) depth profiles")
+    ax_c.tick_params(labelleft=False)
+    ax_c.legend(frameon=False, fontsize=8, loc="lower right")
+    style_axes(ax_c)
+    fig.text(0.5, 0.012, rf"$\theta/\mathcal{{T}} = [F_{{2x}}/(\lambda\,T_{{2x}})]\;g(\zeta,\tau)$, "
+             rf"$F_{{2x}}/(\lambda T_{{2x}})$ = {rate:.3f} $\degree$C yr$^{{-1}}$ ($T_{{2x}}$ = 70 yr), "
+             r"$g(\zeta,\tau) = \int_0^\tau h(\zeta,u)\,du$: all runs collapse onto it",
+             ha="center", fontsize=9)
+    fig.tight_layout(h_pad=3, rect=(0, 0.04, 1, 1))
+    savefig(fig, "held_linear_response_numeric.png")
 
 
 if __name__ == "__main__":

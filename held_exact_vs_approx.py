@@ -16,7 +16,15 @@ Duhamel + parts gives
 The closed form H_exact is validated here against a brute-force numerical
 convolution of the impulse response g = dh/dtau,
     g(tau) = 1/sqrt(pi tau) - exp(tau) erfc(sqrt(tau))
-integrated directly against the linear ramp forcing (Held's eq. for T(tau)).
+integrated directly against the linear ramp forcing (Held's eq. for T(tau)),
+    T(tau) = int_0^tau F(xi) g(tau - xi) dxi.
+A second check builds g straight from the exact step response, g = dh_exact/dtau
+by finite difference, so it also tests the hand-derived g_exact formula.
+
+Matched 1-box, c dT/dt = -lambda T + F with c = lambda*T (the heat capacity of a
+layer V_beta*T = H deep, so its relaxation time is the diffusive T):
+    h_box = 1 - exp(-tau),  g_box = exp(-tau),  H_box = tau - 1 + exp(-tau)
+compared with the diffusive model in figures/held_box_vs_diffusive.png.
 """
 
 import numpy as np
@@ -25,7 +33,7 @@ from scipy.integrate import quad
 from scipy.special import erfcx  # erfcx(x) = exp(x^2) erfc(x), overflow-free
 
 RAMP, TMAX = 70.0, 200.0
-SCALES = [(5, "#c0392b"), (41, "#2c5aa0"), (80, "#3fa34d")]
+SCALES = [(5, "#c0392b"), (41, "#2c5aa0"), (80, "#3fa34d"), (200, "#257ec2"), (1200, "#d11fb6")]
 
 pos = lambda x: np.maximum(np.asarray(x, float), 0.0)
 
@@ -37,6 +45,19 @@ H_approx = lambda tau: pos(tau) - 2 * np.sqrt(pos(tau) / np.pi) + (2 / np.pi) * 
 
 g_exact = lambda tau: 1 / np.sqrt(np.pi * tau) - erfcx(np.sqrt(tau))
 
+# 1-box with c = lambda*T = rho c_p V_beta T, the heat capacity of a layer of
+# Held's depth scale H = V_beta*T, so c/lambda = T: same lambda, T and H as the
+# diffusive model, all the heat stored in one well-mixed layer.
+h_box = lambda tau: -np.expm1(-pos(tau))
+g_box = lambda tau: np.exp(-tau)
+H_box = lambda tau: pos(tau) + np.expm1(-pos(tau))
+
+
+def g_from_h(tau, h=h_exact, eps=1e-5):
+    """g = dh/dtau by central difference of the step response itself. The step
+    is relative to tau so it never crosses tau=0, where g ~ tau^-1/2."""
+    return (h(tau * (1 + eps)) - h(tau * (1 - eps))) / (2 * eps * tau)
+
 
 def response(t, scale, H):
     """Unnormalized linear-ramp response (unit forcing/sensitivity, F/lambda=1):
@@ -46,18 +67,27 @@ def response(t, scale, H):
     return (scale / RAMP) * (H(t / scale))
 
 
-def response_numeric(t, scale):
+def response_numeric(t, scale, g=g_exact, F=None, knots=()):
     """Same quantity by direct quadrature of int F(xi) g(tau-xi) dxi.
 
     No closed form used, so agreement with response(..., H_exact) is an
-    independent check of the analytic antiderivative.
+    independent check of the analytic antiderivative. With g=g_from_h the
+    kernel comes directly from h_exact, checking g_exact as well.
+
+    F is the forcing as a function of time in years (in units of F_max, so the
+    result is lambda*T/F_max); it defaults to the linear ramp t/RAMP. `knots`
+    are times [yr] where F has kinks (e.g. the years of a tabulated series),
+    passed to quad as breakpoints.
     """
-    tau70 = RAMP / scale
+    if F is None:
+        F = lambda tt: tt / RAMP
+    knots = np.asarray(knots, float) / scale
 
     def conv(tau):
-        # F(xi) = xi/tau70; g has an integrable xi^-1/2 endpoint singularity
-        f = lambda xi: (xi / tau70) * g_exact(tau - xi)
-        return quad(f, 0, tau, points=[tau], limit=400)[0]
+        # g has an integrable xi^-1/2 endpoint singularity at xi = tau
+        f = lambda xi: F(xi * scale) * g(tau - xi)
+        pts = [k for k in knots if 0 < k < tau] + [tau]
+        return quad(f, 0, tau, points=pts, limit=max(400, 2 * len(pts)))[0]
 
     return np.array([conv(x / scale) for x in np.atleast_1d(t)])
 
@@ -125,8 +155,14 @@ for scale, c in SCALES:
     num = response_numeric(t_chk, scale)
     print(f"T={scale:3d} yr   max |analytic - numerical| = "
           f"{np.abs(num - response(t_chk, scale, H_exact)).max():.2e}")
+    num_h = response_numeric(t_chk, scale, g_from_h)
+    print(f"T={scale:3d} yr   max |analytic - numerical| (g = dh_exact/dtau) = "
+          f"{np.abs(num_h - response(t_chk, scale, H_exact)).max():.2e}")
     print(f"T={scale:3d} yr   t=200: exact {exact[-1]:.3f}  approx {approx[-1]:.3f}"
           f"  ({100*(approx[-1]-exact[-1])/exact[-1]:+.1f}%)")
+    num_box = response_numeric(t_chk, scale, g_box)
+    print(f"T={scale:3d} yr   1-box max |analytic - numerical| = "
+          f"{np.abs(num_box - response(t_chk, scale, H_box)).max():.2e}")
 
 axes[1].set(xlabel="time (yrs)",
             # T_eq = F_max/lambda, the equilibrium warming for the yr-70 forcing
@@ -233,3 +269,141 @@ axes[1].legend(fontsize=8, loc="lower right")
 
 fig.tight_layout(h_pad=2.5)
 fig.savefig("figures/held_exact_vs_approx.png", dpi=160)
+
+
+# --- Held's historical-forcing figure: WMGHG forcing through the convolution ---
+# T(t) = int_0^t F(xi) g(t - xi) dxi with F the well-mixed GHG forcing of
+# data/forcing_1850_2100.txt, integrated from 1850 (forcing taken as switching
+# on there) and plotted 1880-2011. Forcing is normalized by F2X and temperature
+# by the TCR, i.e. the response at yr 70 of a linear ramp reaching F2X there --
+# response_numeric(RAMP, scale) in the same units -- so lambda drops out.
+F2X = 5.35 * np.log(2)          # forcing for doubled CO2 [W m^-2], Myhre et al. (1998)
+yr, F_ghg = np.loadtxt("data/forcing_1850_2100.txt", skiprows=1, usecols=(0, 3), unpack=True)
+F_of_t = lambda tt: np.interp(tt, yr - yr[0], F_ghg / F2X)
+plot_yrs = yr[(yr >= 1880) & (yr <= 2011)]
+
+fig2, ax = plt.subplots(figsize=(6.5, 5))
+WMGHG_SCALES = [(1, "#8c564b"), (5, "#c0392b"), (80, "#3fa34d"), (200, "#257ec2"), (1200, "#d11fb6"), (10000, "#faee0a")]
+for scale, c in WMGHG_SCALES:
+    tcr = response_numeric(RAMP, scale)[0]
+    T_hist = response_numeric(plot_yrs - yr[0], scale, F=F_of_t, knots=yr - yr[0])
+    ax.plot(plot_yrs, T_hist / tcr, c, lw=2, label=f"{scale} yrs")
+    print(f"T={scale:3d} yr   T/TCR in {plot_yrs[-1]:.0f} = {T_hist[-1] / tcr:.3f}")
+ax.plot(plot_yrs, F_of_t(plot_yrs - yr[0]), "k", lw=1.5, label="forcing/F2X")
+ax.set(xlabel="year", ylabel="temperature/TCR", xlim=(1870, 2020))
+ax.grid(alpha=0.25, lw=0.6)
+ax.legend(fontsize=9, loc="upper left")
+fig2.tight_layout()
+fig2.savefig("figures/held_wmghg_response.png", dpi=160)
+
+
+# --- Held's ramp-then-hold figure: linear ramp to yr 70, constant after --------
+# F(t) = F2X*min(t, 70)/70, through the same convolution. Temperature is divided
+# by the TCR, the response at yr 70 (where the ramp ends, so it is the same TCR
+# as above), so F2X and lambda drop out.
+F_hold = lambda tt: np.minimum(tt, RAMP) / RAMP
+t_hold = np.linspace(1e-6, TMAX, 401)
+
+fig3, ax = plt.subplots(figsize=(6.5, 5))
+HOLD_SCALES = [(1, "#8c564b"), (5, "#c0392b"), (20, "#2c5aa0"), (80, "#3fa34d"),
+               (200, "#e69f00"), (1200, "#d11fb6"), (10000, "k")]
+for scale, c in HOLD_SCALES:
+    tcr = response_numeric(RAMP, scale)[0]
+    T_hold = response_numeric(t_hold, scale, F=F_hold, knots=(RAMP,))
+    ax.plot(t_hold, T_hold / tcr, c, lw=2, label=f"{scale} yrs")
+    print(f"T={scale:3d} yr   T/TCR at t={TMAX:.0f} = {T_hold[-1] / tcr:.3f}")
+
+# T -> inf limit (tau -> 0). With the small-tau series
+#     e^tau erfc(sqrt(tau)) = 1 - 2 tau^1/2/sqrt(pi) + tau - 4 tau^3/2/(3 sqrt(pi)) + O(tau^2),
+# the constant, tau^1/2 and tau terms of H_exact cancel, leaving
+#     H(tau) ~ 4 tau^3/2 / (3 sqrt(pi)).
+# The ramp-then-hold response is a ramp minus the same ramp delayed by RAMP, so
+#     T/TCR -> [t^3/2 - (t - 70)_+^3/2] / 70^3/2,
+# independent of T: the prefactor (T/RAMP)*T^-3/2 cancels against the TCR, so
+# any scale passed to response() gives the same curve.
+H_lead = lambda tau: 4 / (3 * np.sqrt(np.pi)) * pos(tau)**1.5
+hold_lead = lambda tt: response(tt, 1.0, H_lead) - response(tt - RAMP, 1.0, H_lead)
+T_lim = hold_lead(t_hold) / hold_lead(RAMP)
+ax.plot(t_hold, T_lim, color="0.45", lw=1.5, ls="--",
+        label=r"$\mathcal{T}\to\infty$: $[t^{3/2}-(t-70)_+^{3/2}]/70^{3/2}$")
+print(f"T->inf       T/TCR at t={TMAX:.0f} = {T_lim[-1]:.3f}")
+
+# T -> 0 limit during the ramp: the ocean equilibrates instantly, T = F/lambda,
+# and TCR -> F_max/lambda, so T/TCR = t/70 for t <= 70.
+ax.plot([0, RAMP], [0, 1], color="k", lw=1.2, ls=":", label=r"$\mathcal{T}\to 0$: $T = F/\lambda$, i.e. $t/70$")
+ax.set(xlabel="time (yrs)", ylabel="temperature/TCR", xlim=(0, TMAX), ylim=(0, None))
+ax.grid(alpha=0.25, lw=0.6)
+ax.legend(fontsize=9, loc="upper left")
+
+# Inset: TCR/TEQ = response(RAMP, T, H_exact), the fraction of equilibrium
+# realized at yr 70, against T, with a dot per timescale of the main panel.
+axin = ax.inset_axes([0.6, 0.1, 0.37, 0.27])
+T_line = np.geomspace(1.0, 1e4, 400)
+axin.plot(T_line, response(RAMP, T_line, H_exact), "0.3", lw=1.2)
+for scale, c in HOLD_SCALES:
+    tcr_teq = response(RAMP, scale, H_exact)
+    axin.plot(scale, tcr_teq, "o", color=c, mec="k", mew=0.5, ms=5)
+    print(f"T={scale:5d} yr   TCR/TEQ = {tcr_teq:.3f}")
+axin.set_xscale("log")
+axin.set(xlim=(0.6, 1.7e4), ylim=(0, 1))
+axin.set_xlabel(r"$\mathcal{T}$ (yrs)", fontsize=8, labelpad=1)
+axin.set_ylabel("TCR/TEQ", fontsize=8, labelpad=1)
+axin.tick_params(labelsize=7)
+axin.grid(alpha=0.25, lw=0.6)
+fig3.tight_layout()
+fig3.savefig("figures/held_ramp_hold_response.png", dpi=160)
+
+
+# --- Diffusive ocean vs the matched 1-box, timescale by timescale -------------
+# Each T gets a 1-box with c = lambda*T (relaxation time T, depth H): solid =
+# diffusive, dashed = 1-box, same colour per T. (c) and (d) divide each model by
+# its own TCR, response_numeric(RAMP, scale, g) -- the TCR/TEQ of panel (b).
+models = [("diffusive", g_exact, H_exact, "-"), ("1-box", g_box, H_box, "--")]
+BOX_SCALES = [(T0, c) for T0, c in WMGHG_SCALES if T0 in (5, 200, 10000)]
+fig4, ((ax_h, ax_r), (ax_c, ax_d)) = plt.subplots(2, 2, figsize=(12, 9))
+
+tau = np.linspace(0.0, 10.0, 1001)
+ax_h.plot(tau, h_exact(tau), "k", lw=2, label=r"diffusive, $1 - e^{\tau}\,\mathrm{erfc}\sqrt{\tau}$")
+ax_h.plot(tau, h_box(tau), "0.45", lw=2, ls="--", label=r"1-box, $1 - e^{-\tau}$")
+ax_h.set(xlabel=r"$\tau=t/\mathcal{T}$", ylabel="equilibration fraction $h$",
+         title="(a) step response (same for every $\\mathcal{T}$)", xlim=(0, 10), ylim=(0, 1.02))
+ax_h.legend(fontsize=9, loc="lower right")
+
+T_line = np.geomspace(1.0, 1e4, 400)
+for name, g, H, ls in models:
+    ax_r.plot(T_line, [response(RAMP, T0, H) for T0 in T_line], "k", lw=1.5, ls=ls, label=name)
+for scale, c in BOX_SCALES:
+    for name, g, H, ls in models:
+        ax_r.plot(scale, response(RAMP, scale, H), "o", color=c, mec="k", mew=0.6, ms=6)
+ax_r.set_xscale("log")
+ax_r.set(xlabel=r"diffusive / relaxation time scale $\mathcal{T}$ (yrs)", ylabel="TCR/TEQ",
+         title="(b) fraction of equilibrium realized at yr 70 of the ramp", xlim=(1, 1e4), ylim=(0, 1))
+ax_r.legend(fontsize=9, loc="upper right")
+
+print("diffusive vs matched 1-box (each / own TCR):")
+for scale, c in BOX_SCALES:
+    out = []
+    for name, g, H, ls in models:
+        tcr = response_numeric(RAMP, scale, g)[0]
+        T_hold = response_numeric(t_hold, scale, g, F=F_hold, knots=(RAMP,)) / tcr
+        T_hist = response_numeric(plot_yrs - yr[0], scale, g, F=F_of_t, knots=yr - yr[0]) / tcr
+        label = f"{scale} yrs" if name == "diffusive" else None
+        ax_c.plot(t_hold, T_hold, c, lw=2, ls=ls, label=label)
+        ax_d.plot(plot_yrs, T_hist, c, lw=2, ls=ls, label=label)
+        out.append(f"{name}: TCR/TEQ {tcr:.3f}, T/TCR yr {TMAX:.0f} {T_hold[-1]:.3f}, "
+                   f"{plot_yrs[-1]:.0f} {T_hist[-1]:.3f}")
+    print(f"   T={scale:5d} yr   " + "   |   ".join(out))
+ax_d.plot(plot_yrs, F_of_t(plot_yrs - yr[0]), "k", lw=1.5, label="forcing/F2X")
+for ax in (ax_c, ax_d):
+    ax.plot([], [], "0.3", lw=2, ls="-", label="diffusive")
+    ax.plot([], [], "0.3", lw=2, ls="--", label=r"1-box, $c = \lambda\mathcal{T}$")
+ax_c.set(xlabel="time (yrs)", ylabel="temperature/TCR", xlim=(0, TMAX), ylim=(0, None),
+         title="(c) ramp to yr 70, then hold")
+ax_c.legend(fontsize=8, loc="upper left", ncol=2)
+ax_d.set(xlabel="year", ylabel="temperature/TCR", xlim=(1870, 2020),
+         title="(d) WMGHG forcing")
+ax_d.legend(fontsize=8, loc="upper left", ncol=2)
+for ax in (ax_h, ax_r, ax_c, ax_d):
+    ax.grid(alpha=0.25, lw=0.6)
+fig4.tight_layout(h_pad=2)
+fig4.savefig("figures/held_box_vs_diffusive.png", dpi=160)
