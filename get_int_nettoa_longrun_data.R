@@ -91,10 +91,19 @@ for (n_model in 1:Nmodels){
     	int_nettoa_longrun_data[[model]][[expt]] = list()
 	if (model %in% gfdl_models){
 	   pattern = gfdl_files[[model]][[expt]]
-	   int_nettoa_longrun_data[[model]][[expt]]$file   = file.path(gfdldir, pattern)
-	   int_nettoa_longrun_data[[model]][[expt]]$T2M    = read_gfdl_var(pattern, "t_ref")
-	   int_nettoa_longrun_data[[model]][[expt]]$NETTOA = read_gfdl_var(pattern, "swdn_toa") -
-	      read_gfdl_var(pattern, "swup_toa") - read_gfdl_var(pattern, "olr")
+	   int_nettoa_longrun_data[[model]][[expt]]$file = file.path(gfdldir, pattern)
+	   # Read all four variables and cut the longer ones to the shortest, so T2M and
+	   # NETTOA cover the same years (files for one run can differ in length).
+	   v    = lapply(c(t_ref = "t_ref", swdn_toa = "swdn_toa", swup_toa = "swup_toa", olr = "olr"),
+	                 function(var) read_gfdl_var(pattern, var))
+	   lens = sapply(v, length)
+	   n    = min(lens)
+	   if (any(lens != n))
+	      print(paste0("  ", expt, ": lengths ", paste(names(lens), lens, sep = "=", collapse = ", "),
+	                   "; truncated to ", n, " yr"))
+	   v = lapply(v, function(x) x[1:n])
+	   int_nettoa_longrun_data[[model]][[expt]]$T2M    = v$t_ref
+	   int_nettoa_longrun_data[[model]][[expt]]$NETTOA = v$swdn_toa - v$swup_toa - v$olr
 	} else if ( !((model == "HadGEM2") | (model == "MPIESM11")) ){
 	   file = eval(as.name(paste(model,expt,"nc",sep="_")))
 	   int_nettoa_longrun_data[[model]][[expt]]$file = file
