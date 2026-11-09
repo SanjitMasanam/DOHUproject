@@ -223,7 +223,58 @@ def _log_spaced_t_eval(t_final_seconds, n_save):
    return t_eval
 
 
-def _sensitivity_solve_dT(kappa, h_ml, F_ref, T_eq, t_final_years, t_eval, dz_target=15.0, epsilon=1.0):
+# --- Perturbed-run forcing shape ----------------------------------------------
+# Most models are abrupt 4xCO2 (or, for GFDL CM3/ESM2M, abrupt 2xCO2): a step to
+# F_ref at t = 0. GFDL ESM2G instead raises CO2 by 1%/yr to 4x and holds it, so
+# its log-CO2 forcing rises linearly to F_ref over ramp_years and is then
+# constant. Each model's co2_multiple/ramp_years come from the Rdata
+# (get_int_nettoa_longrun_data.R); ramp_years = 0 is the abrupt step, for which
+# every helper below reduces exactly to the constant-F_ref code path.
+
+def _model_meta(model_data):
+   """(co2_multiple, ramp_years) of a model's perturbed run. An older bundle
+   without these entries is read as abrupt 4xCO2."""
+   names = list(model_data.names)
+   co2 = float(model_data.rx2("co2_multiple")[0]) if "co2_multiple" in names else 4.0
+   ramp = float(model_data.rx2("ramp_years")[0]) if "ramp_years" in names else 0.0
+   return co2, ramp
+
+
+def _model_label(model, co2_multiple, ramp_years):
+   """Panel tag: the model name, plus its experiment when it isn't abrupt 4xCO2."""
+   if ramp_years > 0:
+      return rf"{model} ({ramp_years:.0f}-yr ramp$\to${co2_multiple:g}xCO$_2$)"
+   if co2_multiple != 4:
+      return rf"{model} ({co2_multiple:g}xCO$_2$)"
+   return model
+
+
+def _ramp_frac(t_years, ramp_years):
+   """Forcing as a fraction of F_ref at t_years: 1 throughout for an abrupt
+   step, else a linear rise reaching 1 at ramp_years and held after."""
+   t = np.asarray(t_years, dtype=float)
+   if ramp_years <= 0:
+      return np.ones_like(t)
+   return np.minimum(t / ramp_years, 1.0)
+
+
+def _ramp_forcing(F0, ramp_years):
+   """PDEParams.forcing for _ramp_frac: None (the solver's constant F0) for an
+   abrupt step, else F(t) [W/m^2] with t in seconds."""
+   if ramp_years <= 0:
+      return None
+   return lambda t: F0 * min(t / (ramp_years * YEAR), 1.0)
+
+
+def _bin_start(ramp_years, width=50):
+   """Year index of the first 50-yr regression bin. The first bin is always
+   skipped; a ramped run also drops every bin the ramp reaches into (as MT2's
+   bin_skip_for does), so the bins only hold constant-forcing years."""
+   return width * (1 + int(np.ceil(max(ramp_years, 0.0) / width)))
+
+
+def _sensitivity_solve_dT(kappa, h_ml, F_ref, T_eq, t_final_years, t_eval, dz_target=15.0, epsilon=1.0,
+                          ramp_years=0.0):
    """PDE surface response for one sensitivity-sweep (kappa, h_ml, dz) point.
 
    Mirrors the per-point evaluation inside the main curve_fit target
@@ -241,6 +292,7 @@ def _sensitivity_solve_dT(kappa, h_ml, F_ref, T_eq, t_final_years, t_eval, dz_ta
    pde_p = PDEParams(
       kappa=kappa, h_ml=h_ml, dT_eq=T_eq, F0=F_ref, epsilon=epsilon,
       z_max=z_max, Nz=nz, t_final=t_final_years * YEAR,
+      forcing=_ramp_forcing(F_ref, ramp_years),
    )
    sol = pde_solve_model(
       pde_p, t_eval=_log_spaced_t_eval(pde_p.t_final, SENSITIVITY_N_SAVE),
@@ -272,13 +324,13 @@ _PDE_SOL_CACHE_MAX = 8
 
 
 def _cached_pde_solve(kappa, h_ml, eps_, F_ref_, T_eq_, t_final_yrs_,
-                      dz_target_, n_save, rtol=None, atol=None):
+                      dz_target_, n_save, rtol=None, atol=None, ramp_years=0.0):
    """One (possibly cached) PDE solve; returns (pde_params, sol). rtol/atol
    None means the solver's tight defaults (the main-fit setting)."""
    key = (float(kappa), float(h_ml), float(eps_), float(F_ref_), float(T_eq_),
           float(t_final_yrs_), float(dz_target_), int(n_save),
           None if rtol is None else float(rtol),
-          None if atol is None else float(atol))
+          None if atol is None else float(atol), float(ramp_years))
    hit = _PDE_SOL_CACHE.get(key)
    if hit is not None:
       return hit
@@ -286,6 +338,7 @@ def _cached_pde_solve(kappa, h_ml, eps_, F_ref_, T_eq_, t_final_yrs_,
    pde_p = PDEParams(
       kappa=kappa, h_ml=h_ml, dT_eq=T_eq_, F0=F_ref_, epsilon=eps_,
       z_max=z_max, Nz=nz, t_final=t_final_yrs_ * YEAR,
+      forcing=_ramp_forcing(F_ref_, ramp_years),
    )
    kw = {} if rtol is None else {"rtol": rtol, "atol": atol}
    sol = pde_solve_model(pde_p, t_eval=_log_spaced_t_eval(pde_p.t_final, n_save), **kw)
@@ -296,7 +349,7 @@ def _cached_pde_solve(kappa, h_ml, eps_, F_ref_, T_eq_, t_final_yrs_,
 
 
 def pde_H_at(t_years, kappa, h_ml, eps_, F_ref_, T_eq_, t_final_yrs_,
-             dz_target_=PDE_FIT_DZ_TARGET):
+             dz_target_=PDE_FIT_DZ_TARGET, ramp_years_=0.0):
    """Diffusive ocean heat uptake H(t) = rho_cp*kappa*dtheta/dz|_0 [W/m^2] at
    the requested years, for the efficacy calibration's radiative regression
    (N = F - lambda*T - (eps-1)*H). H is the flux the mixed layer loses DOWN
@@ -310,7 +363,8 @@ def pde_H_at(t_years, kappa, h_ml, eps_, F_ref_, T_eq_, t_final_yrs_,
    # the lstsq. With F_ref/lambda floored (EPS_*_FLOOR) this should not trigger.
    try:
       pde_p, sol = _cached_pde_solve(kappa, h_ml, eps_, F_ref_, T_eq_,
-                                     t_final_yrs_, dz_target_, PDE_FIT_N_SAVE)
+                                     t_final_yrs_, dz_target_, PDE_FIT_N_SAVE,
+                                     ramp_years=ramp_years_)
       theta, dz = sol["theta"], sol["dz"]
       # dtheta/dz|_0 (z positive downward) via 2nd-order one-sided difference.
       dtheta_dz0 = (-3.0 * theta[0] + 4.0 * theta[1] - theta[2]) / (2.0 * dz)
@@ -325,7 +379,7 @@ def pde_H_at(t_years, kappa, h_ml, eps_, F_ref_, T_eq_, t_final_yrs_,
 
 
 def _sensitivity_solve_H(kappa, h_ml, F_ref, T_eq, t_final_years, t_eval,
-                         dz_target=15.0, epsilon=1.0):
+                         dz_target=15.0, epsilon=1.0, ramp_years=0.0):
    """Diffusive ocean heat uptake H(t) = rho_cp*kappa*dtheta/dz|_0 [W/m^2] for one
    sensitivity-sweep point. Mirrors _sensitivity_solve_dT (loosened tolerance,
    module-level so it can be dispatched to _SENS_POOL) but returns the surface
@@ -336,6 +390,7 @@ def _sensitivity_solve_H(kappa, h_ml, F_ref, T_eq, t_final_years, t_eval,
    pde_p = PDEParams(
       kappa=kappa, h_ml=h_ml, dT_eq=T_eq, F0=F_ref, epsilon=epsilon,
       z_max=z_max, Nz=nz, t_final=t_final_years * YEAR,
+      forcing=_ramp_forcing(F_ref, ramp_years),
    )
    try:
       sol = pde_solve_model(
@@ -355,7 +410,7 @@ def _sensitivity_solve_H(kappa, h_ml, F_ref, T_eq, t_final_years, t_eval,
 # These run under the fork pool during the parallel Jacobian, so they MUST be
 # module-level (picklable) and defined BEFORE _SENS_POOL is created below.
 
-def _joint_forward(theta, T_eq, eps, lam, fit_t, H_years, bin_H, t_final_years):
+def _joint_forward(theta, T_eq, eps, lam, fit_t, H_years, bin_H, t_final_years, ramp_years=0.0):
    """One PDE solve for the reduced joint fit; returns (T_model at fit_t, H at
    the regression years, 50-yr-binned iff bin_H). theta = [log10(kappa), h_ml];
    T_eq, eps and lam are the FIXED STEP-1 values and F0 = lam*T_eq. Loosened
@@ -369,6 +424,7 @@ def _joint_forward(theta, T_eq, eps, lam, fit_t, H_years, bin_H, t_final_years):
    pde_p = PDEParams(
       kappa=kappa, h_ml=h_ml, dT_eq=T_eq, F0=F0, epsilon=eps,
       z_max=z_max, Nz=nz, t_final=t_final_years * YEAR,
+      forcing=_ramp_forcing(F0, ramp_years),
    )
    try:
       sol = pde_solve_model(
@@ -404,18 +460,19 @@ _JOINT_LAST_R = [None, None]
 def _joint_residuals(theta, data):
    """Stacked, noise-weighted residual for the reduced joint fit:
       [ (T_model - T_obs)/sigma_T ,  (N_model - N_obs)/sigma_N ]
-   with N_model = lambda*(T_eq - T_reg) - (eps-1)*H  (= F - lambda*T - (eps-1)H).
-   theta = [log10(kappa), h_ml]; eps/lam/T_eq are fixed (data). Module-level so
-   the parallel Jacobian can pool.starmap it."""
+   with N_model = lambda*(T_eq*f - T_reg) - (eps-1)*H  (= F(t) - lambda*T - (eps-1)H),
+   f = data["F_frac"] the forcing's fraction of F_ref at each row (1 for an
+   abrupt step). theta = [log10(kappa), h_ml]; eps/lam/T_eq are fixed (data).
+   Module-level so the parallel Jacobian can pool.starmap it."""
    out = _joint_forward(theta, data["T_eq"], data["eps"], data["lam"],
                         data["fit_t"], data["H_years"], data["bin_H"],
-                        data["t_final_years"])
+                        data["t_final_years"], data["ramp_years"])
    if out is None:
       return data["big"]
    T_model, H_reg = out
    eps, lam = data["eps"], data["lam"]
    T_eq = data["T_eq"]
-   N_model = lam * (T_eq - data["T_reg"]) - (eps - 1.0) * H_reg
+   N_model = lam * (T_eq * data["F_frac"] - data["T_reg"]) - (eps - 1.0) * H_reg
    rT = (T_model - data["T_obs"]) / data["sigma_T"]
    rN = (N_model - data["N_obs"]) / data["sigma_N"]
    r = np.concatenate([rT, rN])
@@ -563,7 +620,7 @@ def covariance_from_lstsq(X, y, coeffs):
 
 
 def plot_surface_budget_bars(model, kappa, h_ml, eps, F_ref, T_eq, t_final_years,
-                             png_path, dz_target=PDE_FIT_DZ_TARGET):
+                             png_path, dz_target=PDE_FIT_DZ_TARGET, ramp_years=0.0):
    """Stacked-bar decomposition of the surface tendency dT_s/dt for the best-fit
    PDE solution, one bar per saved time step. The surface node the solver
    integrates is
@@ -575,7 +632,7 @@ def plot_surface_budget_bars(model, kappa, h_ml, eps, F_ref, T_eq, t_final_years
    c_ml = rho_cp*h_ml gives three additive contributions [K/yr] that sum EXACTLY
    to dT_s/dt:
 
-       +F/c_ml                          constant CO2 forcing (flat in time),
+       +F/c_ml                          CO2 forcing (flat in time, or ramped then flat),
        -(lambda*T_s + (eps-1)*H)/c_ml   radiative restoring + efficacy loss,
        -H/c_ml                          plain diffusive heat loss to the thermocline.
 
@@ -589,14 +646,15 @@ def plot_surface_budget_bars(model, kappa, h_ml, eps, F_ref, T_eq, t_final_years
    linear axis with each bar spanning the arithmetic midpoints to its neighbours.
    """
    pde_p, sol = _cached_pde_solve(kappa, h_ml, eps, F_ref, T_eq,
-                                  t_final_years, dz_target, PDE_FIT_N_SAVE)
+                                  t_final_years, dz_target, PDE_FIT_N_SAVE,
+                                  ramp_years=ramp_years)
    t_yr = sol["t"] / YEAR
    theta, dz = sol["theta"], sol["dz"]
    T_s = theta[0]
    c_ml, lam, D = pde_p.c_ml, pde_p.lam, pde_p.D      # lam = F_ref/T_eq exactly
 
    # Per-second tendencies -> K/yr for readability; all three sum to dT_s/dt.
-   forcing   = np.full_like(T_s, F_ref) / c_ml * YEAR
+   forcing   = F_ref * _ramp_frac(t_yr, ramp_years) / c_ml * YEAR
    H_flux    = D * (T_s - theta[1]) / dz             # W/m^2, >0 when surface warmer
    restoring = (-lam * T_s - (eps - 1.0) * H_flux) / c_ml * YEAR   # = (N - F)/c_ml
    uptake    = (-H_flux) / c_ml * YEAR
@@ -807,9 +865,13 @@ rdata_file = Path("./data/int_netToa_longrun.Rdata")
 ro.r["load"](str(rdata_file))
 
 data = ro.globalenv["int_nettoa_longrun_data"]
-models = ['CCSM3', 'CESM1', 'CNRMCM6', 'ECHAM5', 'GISSE2R', 'IPSLCM5A', 'HadGEM2', 'MPIESM11']
+models = ['CCSM3', 'CESM1', 'CNRMCM6', 'ECHAM5', 'GISSE2R', 'IPSLCM5A', 'HadGEM2', 'MPIESM11',
+          'CM3', 'ESM2M', 'ESM2G']   # GFDL: abrupt 2xCO2 (CM3, ESM2M), 1%/yr ramp to 4x (ESM2G)
+# Figure-title prefix: the panels mix experiments, so each non-4xCO2 panel names
+# its own (_model_label) instead of the title claiming 4xCO2 for all of them.
+EXPT_NOTE = r"CO$_2$ runs:"
 # Models actually fit/looped this run. Equal to `models` normally; a subset under
-# --test. Keep `models` (full) for the 8-panel grid layouts.
+# --test. Keep `models` (full) for the panel-grid layouts.
 fit_models = _apply_test_subset(models)
 if _TEST_SPEC is not None:
    print(f"*** TEST MODE: running {len(fit_models)}/{len(models)} models: "
@@ -941,46 +1003,46 @@ for run_type in RUN_TYPES:
       # Create the shared per-experiment figures (one 8-panel grid per model set)
       for expt in ['4xCO2']:
          step1_figs[expt], step1_axs[expt], step1_ratio_axs[expt] = make_model_grid_with_ratio(
-            models, title=r"4xCO$_{2}$ Net TOA vs T$_{2M}$",
+            models, title=EXPT_NOTE + r" Net TOA vs T$_{2M}$",
             xlabel="2-meter Air Temperature Anomaly (K)",
             ylabel=r"Net TOA Radiative Flux Anomaly ($W*m^{-2}$)",
             ratio_ylabel=r"$\frac{F-\lambda T-(\epsilon-1)H}{F-\lambda T}$",
          )
          step1_idx[expt] = 0
 
-         step1_NH_figs[expt], step1_NH_axs[expt] = make_model_grid(models, title=r"4xCO$_{2}$ Net TOA vs Ocean Heat Uptake H", xlabel=r"Ocean Heat Uptake H ($W*m^{-2}$)", ylabel=r"Net TOA Radiative Flux Anomaly ($W*m^{-2}$)")
+         step1_NH_figs[expt], step1_NH_axs[expt] = make_model_grid(models, auto_rows=True, hide_unused=True, title=EXPT_NOTE + r" Net TOA vs Ocean Heat Uptake H", xlabel=r"Ocean Heat Uptake H ($W*m^{-2}$)", ylabel=r"Net TOA Radiative Flux Anomaly ($W*m^{-2}$)")
          step1_NH_idx[expt] = 0
 
-         step1_HT_figs[expt], step1_HT_axs[expt] = make_model_grid(models, title=r"4xCO$_{2}$ Ocean Heat Uptake H vs T$_{2M}$", xlabel="2-meter Air Temperature Anomaly (K)", ylabel=r"Ocean Heat Uptake H ($W*m^{-2}$)")
+         step1_HT_figs[expt], step1_HT_axs[expt] = make_model_grid(models, auto_rows=True, hide_unused=True, title=EXPT_NOTE + r" Ocean Heat Uptake H vs T$_{2M}$", xlabel="2-meter Air Temperature Anomaly (K)", ylabel=r"Ocean Heat Uptake H ($W*m^{-2}$)")
          step1_HT_idx[expt] = 0
 
-         final_figs[expt], final_axs[expt] = make_model_grid(models, dpi=120, title=r"4xCO$_{2}$ T$_{2M}$ vs. Time w/ Diffusive Fit", xlabel=r"Time (years)", ylabel=r"Temperature Anomaly (K)", right=0.95, wspace=0.28)
+         final_figs[expt], final_axs[expt] = make_model_grid(models, auto_rows=True, hide_unused=True, dpi=120, title=EXPT_NOTE + r" T$_{2M}$ vs. Time w/ Diffusive Fit", xlabel=r"Time (years)", ylabel=r"Temperature Anomaly (K)", right=0.95, wspace=0.28)
          final_idx[expt] = 0
          final_xmax[expt] = []
          final_figs[expt].text(0.975, 0.5, "Equilibrium Ratio", ha='center', va='center', fontsize=AXIS_LABEL_FONTSIZE, fontweight="bold", rotation=-90.)
 
-         nettoa_figs[expt], nettoa_axs[expt] = make_model_grid(models, title=r"4xCO$_{2}$ Net TOA vs. Time", xlabel="Time (years)", ylabel=r"Net TOA (10 yr rolling mean, $W\,m^{-2}$)")
+         nettoa_figs[expt], nettoa_axs[expt] = make_model_grid(models, auto_rows=True, hide_unused=True, title=EXPT_NOTE + r" Net TOA vs. Time", xlabel="Time (years)", ylabel=r"Net TOA (10 yr rolling mean, $W\,m^{-2}$)")
          nettoa_idx[expt] = 0
 
-         ohc_ts_figs[expt], ohc_ts_axs[expt] = make_model_grid(models, title=r"4xCO$_2$ OHU vs. Surface Temp (Normalized)", xlabel=r"$T_s/2\, \mathrm{ECS}$", ylabel=r"$\mathrm{OHC}/\mathrm{OHC}_{eq}$")
+         ohc_ts_figs[expt], ohc_ts_axs[expt] = make_model_grid(models, auto_rows=True, hide_unused=True, title=EXPT_NOTE + r" OHU vs. Surface Temp (Normalized)", xlabel=r"$T_s/T_{eq}$", ylabel=r"$\mathrm{OHC}/\mathrm{OHC}_{eq}$")
          ohc_ts_idx[expt] = 0
 
-         sens_kappa_figs[expt], sens_kappa_axs[expt] = make_model_grid(models, title=r"Sensitivity to $\kappa$ (h$_{ml}$ held at best fit)", xlabel="Time (years)", ylabel="Equilibrium Ratio ($T/T_{eq}$)")
+         sens_kappa_figs[expt], sens_kappa_axs[expt] = make_model_grid(models, auto_rows=True, hide_unused=True, title=r"Sensitivity to $\kappa$ (h$_{ml}$ held at best fit)", xlabel="Time (years)", ylabel="Equilibrium Ratio ($T/T_{eq}$)")
          sens_kappa_idx[expt] = 0
 
-         sens_hml_figs[expt], sens_hml_axs[expt] = make_model_grid(models, title=r"Sensitivity to h$_{ml}$ ($\kappa$ held at best fit)", xlabel="Time (years)", ylabel="Equilibrium Ratio ($T/T_{eq}$)")
+         sens_hml_figs[expt], sens_hml_axs[expt] = make_model_grid(models, auto_rows=True, hide_unused=True, title=r"Sensitivity to h$_{ml}$ ($\kappa$ held at best fit)", xlabel="Time (years)", ylabel="Equilibrium Ratio ($T/T_{eq}$)")
          sens_hml_idx[expt] = 0
 
-         sens_hml_uptake_figs[expt], sens_hml_uptake_axs[expt] = make_model_grid(models, title=r"Ocean Heat Uptake Sensitivity to h$_{ml}$ ($\kappa$ held at best fit)", xlabel="Time (years)", ylabel=r"$H$ (W m$^{-2}$)")
+         sens_hml_uptake_figs[expt], sens_hml_uptake_axs[expt] = make_model_grid(models, auto_rows=True, hide_unused=True, title=r"Ocean Heat Uptake Sensitivity to h$_{ml}$ ($\kappa$ held at best fit)", xlabel="Time (years)", ylabel=r"$H$ (W m$^{-2}$)")
          sens_hml_uptake_idx[expt] = 0
 
-         sens_dz_figs[expt], sens_dz_axs[expt] = make_model_grid(models, title=r"Sensitivity to Grid Spacing dz ($\kappa$, h$_{ml}$ held at best fit)", xlabel="Time (years)", ylabel="Equilibrium Ratio ($T/T_{eq}$)")
+         sens_dz_figs[expt], sens_dz_axs[expt] = make_model_grid(models, auto_rows=True, hide_unused=True, title=r"Sensitivity to Grid Spacing dz ($\kappa$, h$_{ml}$ held at best fit)", xlabel="Time (years)", ylabel="Equilibrium Ratio ($T/T_{eq}$)")
          sens_dz_idx[expt] = 0
 
-         sens_t63_figs[expt], sens_t63_axs[expt] = make_model_grid(models, title=r"Years to Reach 63% of T$_{eq}$ vs. $\kappa$/h$_{ml}$", xlabel=r"$\kappa$ (m$^2$/s)", ylabel=r"h$_{ml}$ (m)")
+         sens_t63_figs[expt], sens_t63_axs[expt] = make_model_grid(models, auto_rows=True, hide_unused=True, title=r"Years to Reach 63% of T$_{eq}$ vs. $\kappa$/h$_{ml}$", xlabel=r"$\kappa$ (m$^2$/s)", ylabel=r"h$_{ml}$ (m)")
          sens_t63_idx[expt] = 0
 
-         sens_rmse_figs[expt], sens_rmse_axs[expt] = make_model_grid(models, title=r"Fit RMSE vs. $\kappa$/h$_{ml}$ (Parameter Degeneracy)", xlabel=r"$\kappa$ (m$^2$/s)", ylabel=r"h$_{ml}$ (m)")
+         sens_rmse_figs[expt], sens_rmse_axs[expt] = make_model_grid(models, auto_rows=True, hide_unused=True, title=r"Fit RMSE vs. $\kappa$/h$_{ml}$ (Parameter Degeneracy)", xlabel=r"$\kappa$ (m$^2$/s)", ylabel=r"h$_{ml}$ (m)")
          sens_rmse_idx[expt] = 0
 
          sens_kappa_lines[expt] = []
@@ -995,6 +1057,8 @@ for run_type in RUN_TYPES:
       for model in fit_models:
          # Extract model data from the R dataset
          model_data = data.rx2(model)
+         co2_multiple, ramp_years = _model_meta(model_data)
+         model_label = _model_label(model, co2_multiple, ramp_years)
          t2m_mean = 0.0
          nettoa_mean = 0.0
 
@@ -1033,20 +1097,26 @@ for run_type in RUN_TYPES:
                t2m_annual_reg = t2m.copy()
                nettoa_annual_reg = nettoa.copy()
 
-               # ---- F_ref: intercept of the first-20-yr ANNUAL Net-TOA-vs-T fit.
-               n20 = min(20, t2m_annual_reg.shape[0])
+               # ---- F_ref: intercept of the first 20 ANNUAL years at constant
+               # forcing: years 1-20 for an abrupt step; for a ramped run the 20
+               # years after the ramp (as in MT2), since ramp years sit below F_ref.
+               yrs_reg = np.arange(1, 1 + t2m_annual_reg.shape[0])
+               greg = (yrs_reg > ramp_years) & (yrs_reg <= ramp_years + 20)
+               greg_lbl = f"yrs {yrs_reg[greg][0]}-{yrs_reg[greg][-1]} (annual)"
                [m20, b20], cov20 = np.polyfit(
-                  t2m_annual_reg[:n20], nettoa_annual_reg[:n20], 1, cov=True)
+                  t2m_annual_reg[greg], nettoa_annual_reg[greg], 1, cov=True)
                m20_unc = float(np.sqrt(cov20[0, 0]))
                b20_unc = float(np.sqrt(cov20[1, 1]))
 
                # ---- 50-yr binned fit (FIRST bin skipped, matching the existing
-               # convention) -> T_eq (x-intercept) and eps. Uses the full data for
-               # every run type (run_type 1 included).
+               # convention, plus any bin the ramp reaches into) -> T_eq
+               # (x-intercept) and eps. Uses the full data for every run type
+               # (run_type 1 included).
+               bin_start = _bin_start(ramp_years)
                t2m_bin = np.array([t2m_annual_reg[i:i + 50].mean()
-                                   for i in range(50, t2m_annual_reg.shape[0], 50)])
+                                   for i in range(bin_start, t2m_annual_reg.shape[0], 50)])
                nettoa_bin = np.array([nettoa_annual_reg[i:i + 50].mean()
-                                      for i in range(50, nettoa_annual_reg.shape[0], 50)])
+                                      for i in range(bin_start, nettoa_annual_reg.shape[0], 50)])
                [mb, bb], covb = np.polyfit(t2m_bin, nettoa_bin, 1, cov=True)
                mb_unc = float(np.sqrt(covb[0, 0]))
                bb_unc = float(np.sqrt(covb[1, 1]))
@@ -1091,9 +1161,9 @@ for run_type in RUN_TYPES:
                ax.plot(xb, mb * xb + bb, color="tab:blue", lw=2,
                        label=rf"50-yr fit: $T_{{eq}}$={T_eq:.1f} K, $\epsilon$={eps:.2f}")
                # First-20-yr annual points + their fit (source of F_ref).
-               ax.scatter(t2m_annual_reg[:n20], nettoa_annual_reg[:n20], s=8, alpha=0.5,
-                          color="0.5", label="yrs 1-20 (annual)")
-               x20 = np.linspace(0.0, float(t2m_annual_reg[:n20].max()), 100)
+               ax.scatter(t2m_annual_reg[greg], nettoa_annual_reg[greg], s=8, alpha=0.5,
+                          color="0.5", label=greg_lbl)
+               x20 = np.linspace(0.0, float(t2m_annual_reg[greg].max()), 100)
                ax.plot(x20, m20 * x20 + b20, color="0.35", lw=2,
                        label=rf"20-yr fit: $F_{{ref}}$={F_ref:.3f}")
                ax.axhline(0.0, color="0.7", lw=0.8, ls=":")
@@ -1115,7 +1185,7 @@ for run_type in RUN_TYPES:
                   bbox=dict(boxstyle='round', facecolor='white', edgecolor='none', alpha=0.4),
                )
 
-               format_ax(ax, text=f"{model}", xscale="linear", yscale="linear")
+               format_ax(ax, text=f"{model_label}", xscale="linear", yscale="linear")
                step1_ax_by_model[model] = ax   # STEP 2 overlays the eps*H curve here
                step1_ratio_ax_by_model[model] = step1_ratio_axs[expt][step1_idx[expt]]
                step1_idx[expt] += 1
@@ -1149,6 +1219,7 @@ for run_type in RUN_TYPES:
                   "nettoa_annual": nettoa_annual_reg,
                   "H_years": np.arange(1, 1 + t2m_annual_reg.shape[0]),
                   "bin_H": True,
+                  "bin_start": bin_start,   # STEP 2 bins H from the same year
                }
 
       # NOTE: the STEP 1 (Net TOA vs T2M) figures are intentionally NOT saved
@@ -1162,6 +1233,8 @@ for run_type in RUN_TYPES:
       for model in fit_models:
          # Extract model data for plotting results
          model_data = data.rx2(model)
+         co2_multiple, ramp_years = _model_meta(model_data)
+         model_label = _model_label(model, co2_multiple, ramp_years)
          t2m_mean = 0.0
 
          for expt in expts:
@@ -1242,7 +1315,7 @@ for run_type in RUN_TYPES:
                t_final_years = max(fit_t.max(), plot_t.max())
 
                def make_pde_dT(F_ref_, T_eq_, t_final_yrs_, eps_=1.0, dz_target_=15.0,
-                               rtol_=None, atol_=None):
+                               rtol_=None, atol_=None, ramp_years_=ramp_years):
                   # rtol_/atol_ None = the solver's tight defaults (final reported
                   # curves); the eps=1 SEED fit passes the loosened SENSITIVITY_*
                   # tolerances since it only sets theta0/sigma_T for the joint fit.
@@ -1254,7 +1327,8 @@ for run_type in RUN_TYPES:
                      try:
                         _, sol = _cached_pde_solve(kappa, h_ml, eps_, F_ref_, T_eq_,
                                                    t_final_yrs_, dz_target_,
-                                                   PDE_FIT_N_SAVE, rtol=rtol_, atol=atol_)
+                                                   PDE_FIT_N_SAVE, rtol=rtol_, atol=atol_,
+                                                   ramp_years=ramp_years_)
                         dT = np.interp(t_years, sol["t"] / YEAR, sol["dT"])
                      except Exception:
                         dT = np.full(np.shape(t_years), 1e6, dtype=float)
@@ -1283,7 +1357,11 @@ for run_type in RUN_TYPES:
                # Binned arrays (unchanged): feed the STEP-2 regression-diagnostic
                # plots, which stay 50-yr-binned.
                T_reg, N_reg = np.asarray(ra["t2m"], float), np.asarray(ra["nettoa"], float)
-               H_years, bin_H = ra["H_years"], ra["bin_H"]
+               H_years, bin_H, bin_start = ra["H_years"], ra["bin_H"], ra["bin_start"]
+               # Forcing at each annual row: F_ref throughout for an abrupt step,
+               # the ramp for a ramped run. Every N = F - lambda*T - (eps-1)*H
+               # below that runs over annual years uses it in place of F_ref.
+               F_ann = F_ref * _ramp_frac(H_years, ramp_years)
                # Annual (unbinned) all-year arrays: the joint fit bins NEITHER
                # N/T nor H, so its Net-TOA residual runs over these instead.
                T_ann = np.asarray(ra["t2m_annual"], float)
@@ -1311,7 +1389,7 @@ for run_type in RUN_TYPES:
                sigma_T = max(1e-2, float(np.sqrt(np.mean(
                   (pde_dT_func(fit_t, kappa0, h_ml0) - fit_T_abs) ** 2))))
                sigma_N = max(5e-2, float(np.sqrt(np.mean(
-                  (N_ann - (F_ref - lmbda * T_ann)) ** 2))))
+                  (N_ann - (F_ann - lmbda * T_ann)) ** 2))))
 
                joint_data = {
                   "fit_t": np.asarray(fit_t, float), "T_obs": np.asarray(fit_T_abs, float),
@@ -1320,6 +1398,8 @@ for run_type in RUN_TYPES:
                   "eps": float(eps), "lam": float(lmbda), # STEP-1 eps/lambda (fixed)
                   "H_years": np.asarray(H_years, float), "bin_H": False,   # H not binned
                   "t_final_years": float(t_final_years),
+                  "ramp_years": float(ramp_years),
+                  "F_frac": _ramp_frac(H_years, ramp_years),   # F(t)/F_ref per annual row
                   "sigma_T": sigma_T, "sigma_N": sigma_N,
                   "big": np.full(int(fit_t.shape[0] + N_ann.shape[0]), 1e3),
                }
@@ -1385,11 +1465,11 @@ for run_type in RUN_TYPES:
                # N-vs-T panel's annual overlays, plus the 50-yr-binned H_reg_final
                # used by the other diagnostic panels (N-vs-H, H-vs-T, 3D, ratio).
                H_annual = pde_H_at(H_years, kappa_pde, h_ml_pde, eps,
-                                    F_ref, T_eq, t_final_years)
+                                    F_ref, T_eq, t_final_years, ramp_years_=ramp_years)
                H_reg_final = H_annual
                if bin_H:
                   H_reg_final = np.array([H_annual[i:i + 50].mean()
-                                          for i in range(50, H_annual.shape[0], 50)])
+                                          for i in range(bin_start, H_annual.shape[0], 50)])
                T_reg_arr = np.asarray(T_reg, dtype=float)
                ax1 = step1_ax_by_model[model]
 
@@ -1399,7 +1479,7 @@ for run_type in RUN_TYPES:
                # (eps-1)*H are drawn over the ENTIRE annual series instead of the
                # 50-yr bins, and the annual (T, N) AOGCM points are added as a
                # faint cloud beneath the 50-yr-bin points already on the axis.
-               N_line_ann = F_ref - lmbda * T_ann
+               N_line_ann = F_ann - lmbda * T_ann
                N_eps_ann = N_line_ann - (eps - 1.0) * H_annual
                rmse_eps = float(np.sqrt(np.mean((N_ann - N_eps_ann) ** 2)))
                order_ann = np.argsort(T_ann)
@@ -1441,7 +1521,7 @@ for run_type in RUN_TYPES:
                ax_nh.plot(one_one, one_one, color="0.5", lw=1.0, ls="-.", label="N = H (Analytical Sol.)")
                ax_nh.plot(H_reg_final, N_eps_line, color="green", lw=2, ls="--",
                           label=r"$N=F-\lambda T-(\epsilon-1) H$")
-               format_ax(ax_nh, text=f"{model}", xscale="linear", yscale="linear",
+               format_ax(ax_nh, text=f"{model_label}", xscale="linear", yscale="linear",
                          legend_loc="lower right")
 
                # ----- STEP 1 (H vs T) panel: ocean heat uptake H vs surface -----
@@ -1471,13 +1551,14 @@ for run_type in RUN_TYPES:
                order_T = np.argsort(T_reg_roll)
                ax_ht.plot(T_reg_roll[order_T], H_reg_roll[order_T], color="lightblue",
                           lw=2, label="H (PDE fit, 10-yr mean)")
-               ax_ht.plot(T_reg_roll[order_T], F_ref/eps - (lmbda/eps)*T_reg_roll[order_T], color="0.5", lw=1.0, ls="-.", label="H (analytical sol.)")
+               if ramp_years <= 0:   # step-forcing solution; no ramped counterpart
+                  ax_ht.plot(T_reg_roll[order_T], F_ref/eps - (lmbda/eps)*T_reg_roll[order_T], color="0.5", lw=1.0, ls="-.", label="H (analytical sol.)")
                if abs(eps - 1.0) > 1e-6:
                   H_inv = (F_ref - N_reg_arr - lmbda * T_reg_arr) / (eps - 1.0)
                   H_inv_roll = roll10(H_inv)
                   ax_ht.scatter(T_reg_roll, H_inv_roll, s=8, alpha=0.5, color="green",
                                 label=r"$H=(F-N-\lambda T)/(\epsilon-1)$ (AOGCM, 10-yr mean)")
-               format_ax(ax_ht, text=f"{model}\n$\\epsilon$={eps:.2f}", xscale="linear",
+               format_ax(ax_ht, text=f"{model_label}\n$\\epsilon$={eps:.2f}", xscale="linear",
                          yscale="linear", legend_loc="lower left")
 
                # 3D view of the same multilinear regression: (T, H, N) scatter +
@@ -1496,6 +1577,7 @@ for run_type in RUN_TYPES:
                plot_surface_budget_bars(
                   model, kappa_pde, h_ml_pde, eps, F_ref, T_eq, t_final_years,
                   layout.reserve(BUDGET, figname(expt, model, "surface_budget_bars")),
+                  ramp_years=ramp_years,
                )
 
                # ECHAM5 only: theta(z, t) at six fractions of the column depth,
@@ -1512,7 +1594,7 @@ for run_type in RUN_TYPES:
                # (matches 2013b's Net TOA reconstruction; H = 0 recovers the
                # plain N = F - lambda*T when eps = 1).
                H_plot = pde_H_at(plot_t, kappa_pde, h_ml_pde, eps,
-                                  F_ref, T_eq, t_final_years)
+                                  F_ref, T_eq, t_final_years, ramp_years_=ramp_years)
 
                # Purely diffusive counterpart (h_ml -> 0): uses D = kappa_pde
                # (see above -- "Diffusive Analytical"'s T is now derived from
@@ -1534,7 +1616,7 @@ for run_type in RUN_TYPES:
                pde_p_h0 = PDEParams(kappa=D, h_ml=H_ML_PURELY_DIFFUSIVE,
                                      dT_eq=T_eq, F0=F_ref, t_final=t_final_years * YEAR,
                                      z_max=PDE_Z_MAX, Nz=_pde_grid(PDE_FIT_DZ_TARGET)[1],
-                                     semi_infinite=True)
+                                     semi_infinite=True, forcing=_ramp_forcing(F_ref, ramp_years))
                sol_h0 = pde_solve_model(pde_p_h0, n_save=250)
                pde_T_h0 = np.interp(plot_t, sol_h0["t"] / YEAR, sol_h0["dT"]) / T_eq
 
@@ -1573,10 +1655,11 @@ for run_type in RUN_TYPES:
                                                eps, dz_target_=PDE_FIT_DZ_TARGET)
                   pde_T_eq = pde_dT_func_eq(eq_t, kappa_pde, h_ml_pde) / T_eq
                   H_eq = pde_H_at(eq_t, kappa_pde, h_ml_pde, eps, F_ref, T_eq,
-                                  OHC_TS_EQUILIBRIUM_YEARS)
+                                  OHC_TS_EQUILIBRIUM_YEARS, ramp_years_=ramp_years)
                   z_max_eq, _ = _pde_grid(PDE_FIT_DZ_TARGET)
                   ohc_ref_eq = 5.1e14 * 4.186e6 * z_max_eq    # OHC_eq / T_eq  [J/K]
-                  N_pde = F_ref - lmbda * (T_eq * pde_T_eq) - (eps - 1.0) * H_eq
+                  N_pde = (F_ref * _ramp_frac(eq_t, ramp_years) - lmbda * (T_eq * pde_T_eq)
+                           - (eps - 1.0) * H_eq)
                   normalized_OHC_pred = (5.1e14 * 31536000 * np.cumsum(N_pde)) / ohc_ref_eq
 
                   print(f"{model} OHC_eq diff-eps / reference:", ohc_ref_eq / (1.37e21 * 3850))
@@ -1587,7 +1670,7 @@ for run_type in RUN_TYPES:
                   sc = ax.scatter(t2m/T_eq, normalized_OHC/T_eq, c=np.arange(1, 1+normalized_OHC.shape[0], 1), cmap=cmap, norm=norm)
                   ax.plot(pde_T_eq, normalized_OHC_pred/T_eq, color='green', label='1-Box + Diffusion Fit')
                   ax.axvline(1.0, color="0.55", ls='--', lw=0.8)
-                  format_ax(ax, text=f"{model}", xscale="linear", yscale="linear", ylim=(-0.05, 1.2))
+                  format_ax(ax, text=f"{model_label}", xscale="linear", yscale="linear", ylim=(-0.05, 1.2))
                   ohc_ts_idx[expt] += 1
 
                # ----- Sensitivity sweep: kappa & h_ml -----
@@ -1608,13 +1691,13 @@ for run_type in RUN_TYPES:
                kappa_sweep_curves = [
                   c / T_eq for c in _SENS_POOL.starmap(
                      _sensitivity_solve_dT,
-                     [(k, h_ml_pde, F_ref, T_eq, t_final_years, plot_t, PDE_FIT_DZ_TARGET, eps) for k in kappa_grid_1d],
+                     [(k, h_ml_pde, F_ref, T_eq, t_final_years, plot_t, PDE_FIT_DZ_TARGET, eps, ramp_years) for k in kappa_grid_1d],
                   )
                ]
                h_ml_sweep_curves = [
                   c / T_eq for c in _SENS_POOL.starmap(
                      _sensitivity_solve_dT,
-                     [(kappa_pde, h, F_ref, T_eq, t_final_years, plot_t, PDE_FIT_DZ_TARGET, eps) for h in h_ml_grid_1d],
+                     [(kappa_pde, h, F_ref, T_eq, t_final_years, plot_t, PDE_FIT_DZ_TARGET, eps, ramp_years) for h in h_ml_grid_1d],
                   )
                ]
 
@@ -1628,7 +1711,7 @@ for run_type in RUN_TYPES:
                )
                h_ml_uptake_curves = _SENS_POOL.starmap(
                   _sensitivity_solve_H,
-                  [(kappa_pde, h, F_ref, T_eq, t_final_years, plot_t, PDE_FIT_DZ_TARGET, eps) for h in h_ml_uptake_grid],
+                  [(kappa_pde, h, F_ref, T_eq, t_final_years, plot_t, PDE_FIT_DZ_TARGET, eps, ramp_years) for h in h_ml_uptake_grid],
                )
 
                # Grid-resolution sweep: kappa/h_ml held at their best fit, only
@@ -1641,7 +1724,7 @@ for run_type in RUN_TYPES:
                dz_sweep_curves = [
                   c / T_eq for c in _SENS_POOL.starmap(
                      _sensitivity_solve_dT,
-                     [(kappa_pde, h_ml_pde, F_ref, T_eq, t_final_years, plot_t, dz, eps) for dz in dz_grid_1d],
+                     [(kappa_pde, h_ml_pde, F_ref, T_eq, t_final_years, plot_t, dz, eps, ramp_years) for dz in dz_grid_1d],
                   )
                ]
 
@@ -1662,7 +1745,7 @@ for run_type in RUN_TYPES:
                t_grid_common = np.linspace(1.0, t_final_years, 400)
 
                grid_2d_args = [
-                  (k_val, h_val, F_ref, T_eq, t_final_years, t_grid_common, PDE_FIT_DZ_TARGET, eps)
+                  (k_val, h_val, F_ref, T_eq, t_final_years, t_grid_common, PDE_FIT_DZ_TARGET, eps, ramp_years)
                   for h_val in h_ml_grid_2d
                   for k_val in kappa_grid_2d
                ]
@@ -1686,7 +1769,7 @@ for run_type in RUN_TYPES:
                   sens_kappa_lines[expt].append((line, k_val))
                ax.scatter(plot_t, plot_T, s=4, color="red", label="AOGCM", zorder=4)
                ax.plot(plot_t, pde_T, color="black", lw=2, label="Best Fit", zorder=5)
-               format_ax(ax, text=f"{model}", xscale="linear", yscale="linear", legend_loc="lower right")
+               format_ax(ax, text=f"{model_label}", xscale="linear", yscale="linear", legend_loc="lower right")
                ax.text(
                   0.02,
                   0.92,
@@ -1706,7 +1789,7 @@ for run_type in RUN_TYPES:
                   sens_hml_lines[expt].append((line, h_val))
                ax.scatter(plot_t, plot_T, s=4, color="red", label="AOGCM", zorder=4)
                ax.plot(plot_t, pde_T, color="black", lw=2, label="Best Fit", zorder=5)
-               format_ax(ax, text=f"{model}", xscale="linear", yscale="linear", legend_loc="lower right")
+               format_ax(ax, text=f"{model_label}", xscale="linear", yscale="linear", legend_loc="lower right")
                ax.text(
                   0.02,
                   0.92,
@@ -1729,8 +1812,9 @@ for run_type in RUN_TYPES:
                   sens_hml_uptake_lines[expt].append((line, h_val))
                ax.axhline(0.0, color="0.6", lw=0.8, ls=":")
                ax.plot(plot_t, H_plot, color="black", lw=2, label="Best Fit", zorder=5)
-               ax.plot(plot_t, F_ref/eps - F_ref/eps*(1-erfcx(np.sqrt(plot_t*(YEAR*(lmbda/eps)**2)/(kappa_pde*4.186e6**2)))), color="blue", lw=2, label="Analytical Solution") # Solution to H for diffusive-eps model (T_eq*lmbda/eps=F_ref/eps)
-               format_ax(ax, text=f"{model}", xscale="linear", yscale="linear", legend_loc="center right")
+               if ramp_years <= 0:   # step-forcing solution; no ramped counterpart
+                  ax.plot(plot_t, F_ref/eps - F_ref/eps*(1-erfcx(np.sqrt(plot_t*(YEAR*(lmbda/eps)**2)/(kappa_pde*4.186e6**2)))), color="blue", lw=2, label="Analytical Solution") # Solution to H for diffusive-eps model (T_eq*lmbda/eps=F_ref/eps)
+               format_ax(ax, text=f"{model_label}", xscale="linear", yscale="linear", legend_loc="center right")
                ax.text(
                   0.02,
                   0.92,
@@ -1750,7 +1834,7 @@ for run_type in RUN_TYPES:
                   sens_dz_lines[expt].append((line, dz_val))
                ax.scatter(plot_t, plot_T, s=4, color="red", label="AOGCM", zorder=4)
                ax.plot(plot_t, pde_T, color="black", lw=2, label="Best Fit", zorder=5)
-               format_ax(ax, text=f"{model}", xscale="linear", yscale="linear", legend_loc="lower right")
+               format_ax(ax, text=f"{model_label}", xscale="linear", yscale="linear", legend_loc="lower right")
                ax.text(
                   0.02,
                   0.92,
@@ -1771,7 +1855,7 @@ for run_type in RUN_TYPES:
                ax.scatter([kappa_pde], [h_ml_pde], marker="*", s=180, color="red",
                           edgecolor="black", linewidth=0.8, zorder=5, label="Best Fit")
                sens_t63_meshes[expt].append((mesh, t63_grid))
-               format_ax(ax, text=f"{model}", xscale="log", yscale="linear", legend=False, grid=False)
+               format_ax(ax, text=f"{model_label}", xscale="log", yscale="linear", legend=False, grid=False)
                sens_t63_idx[expt] += 1
 
                # --- Panel 5: RMSE-vs-data heatmap over (kappa, h_ml) ---
@@ -1783,7 +1867,7 @@ for run_type in RUN_TYPES:
                ax.scatter([kappa_pde], [h_ml_pde], marker="*", s=180, color="red",
                           edgecolor="black", linewidth=0.8, zorder=5, label="Best Fit")
                sens_rmse_meshes[expt].append((mesh, rmse_grid))
-               format_ax(ax, text=f"{model}", xscale="log", yscale="linear", legend=False, grid=False)
+               format_ax(ax, text=f"{model_label}", xscale="log", yscale="linear", legend=False, grid=False)
                sens_rmse_idx[expt] += 1
 
                # Draw observed and fitted temperature curves
@@ -1791,7 +1875,8 @@ for run_type in RUN_TYPES:
                ax.scatter(plot_t, T_eq*plot_T, s=4, color="red")
                ax.plot(plot_t, T_eq*plot_T, color="red", label="2-m Surface Temp.")
                # ax.plot(plot_t, T_eq*fit_func_ode(plot_t, tau), color="green", label="1-Box Analytical")
-               ax.plot(plot_t, T_eq*fit_func_diff(plot_t, T), color="blue", label="Diffusive Analytical")
+               if ramp_years <= 0:   # Held's step response; no ramped counterpart
+                  ax.plot(plot_t, T_eq*fit_func_diff(plot_t, T), color="blue", label="Diffusive Analytical")
                ax.plot(plot_t, T_eq*pde_T, color="purple", label="1-Box + Diffusion Fit")
                ax.plot(plot_t, T_eq*pde_T_h0, color="purple", ls="-.",
                        label=r"Diffusive Numerical (h$_{ml}\to0$, $\infty$ ocean)")
@@ -1817,7 +1902,7 @@ for run_type in RUN_TYPES:
                ratio_ticks = np.arange(0.2, 1.21, 0.2)
                format_ax(
                   ax,
-                  text=f"{model}",
+                  text=f"{model_label}",
                   xscale="linear",
                   yscale="linear",
                   ylim=(y_bottom, y_top),
@@ -1846,7 +1931,8 @@ for run_type in RUN_TYPES:
                t_rollingMu = plot_t[: nettoa_rollingMu.shape[0]]
                # TOA imbalance of the PDE fit, including the efficacy term
                # (matches the OHC panel's N_pde and the 3D-plane relation).
-               N_pde = F_ref - lmbda * (T_eq * pde_T) - (eps - 1.0) * H_plot
+               F_plot = F_ref * _ramp_frac(plot_t, ramp_years)
+               N_pde = F_plot - lmbda * (T_eq * pde_T) - (eps - 1.0) * H_plot
 
                # TOA imbalance from the same radiative relation but fed the
                # ACTUAL AOGCM T2m timeseries (T_eq*plot_T) instead of the PDE-fit
@@ -1862,14 +1948,17 @@ for run_type in RUN_TYPES:
                H_roll = np.array([
                   np.mean(H_plot[i:i + 10]) for i in range(H_plot.shape[0] - 9)
                ])
-               N_aogcm_eps = F_ref - lmbda * T_aogcm_roll - (eps - 1.0) * H_roll
+               F_roll = np.array([
+                  np.mean(F_plot[i:i + 10]) for i in range(F_plot.shape[0] - 9)
+               ])
+               N_aogcm_eps = F_roll - lmbda * T_aogcm_roll - (eps - 1.0) * H_roll
 
                ax = nettoa_axs[expt][nettoa_idx[expt]]
                ax.plot(t_rollingMu, nettoa_rollingMu, color="black", label="AOGCM")
                ax.plot(plot_t, N_pde, color="purple", label="1-Box + Diffusion Fit")
                ax.plot(t_rollingMu, N_aogcm_eps, color="darkorange", ls="--",
                        label=r"$F-\lambda T_{AOGCM}-(\epsilon-1) H$ (10-yr mean)")
-               format_ax(ax, text=f"{model}", xscale="linear", yscale="log", legend_loc="lower left")
+               format_ax(ax, text=f"{model_label}", xscale="linear", yscale="log", legend_loc="lower left")
                nettoa_idx[expt] += 1
 
                # ----- Progress / ETA -----

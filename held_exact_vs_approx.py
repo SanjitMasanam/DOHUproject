@@ -354,6 +354,41 @@ fig3.tight_layout()
 fig3.savefig("figures/held_ramp_hold_response.png", dpi=160)
 
 
+# --- Same figure with the ramp continued to TMAX instead of held at yr 70 -------
+# F(t) = F2X*t/70 for all t, so T is the closed-form linear response of panel (b)
+# (checked against response_numeric above) and T/TCR = H(t/T)/H(70/T).
+fig3b, ax = plt.subplots(figsize=(6.5, 5))
+for scale, c in HOLD_SCALES:
+    T_ramp = response(t_hold, scale, H_exact) / response(RAMP, scale, H_exact)
+    ax.plot(t_hold, T_ramp, c, lw=2, label=f"{scale} yrs")
+    print(f"T={scale:5d} yr   continued ramp: T/TCR at t={TMAX:.0f} = {T_ramp[-1]:.3f}")
+
+# T -> inf: H ~ tau^3/2, so T/TCR -> (t/70)^3/2. T -> 0: T = F/lambda throughout.
+T_lim = response(t_hold, 1.0, H_lead) / response(RAMP, 1.0, H_lead)
+ax.plot(t_hold, T_lim, color="0.45", lw=1.5, ls="--",
+        label=r"$\mathcal{T}\to\infty$: $(t/70)^{3/2}$")
+ax.plot(t_hold, t_hold / RAMP, color="k", lw=1.2, ls=":",
+        label=r"$\mathcal{T}\to 0$: $T = F/\lambda$, i.e. $t/70$")
+print(f"T->inf       continued ramp: T/TCR at t={TMAX:.0f} = {T_lim[-1]:.3f}")
+ax.axvline(RAMP, color="0.6", lw=0.8, ls=":")
+ax.set(xlabel="time (yrs)", ylabel="temperature/TCR", xlim=(0, TMAX), ylim=(0, None))
+ax.grid(alpha=0.25, lw=0.6)
+ax.legend(fontsize=9, loc="upper left")
+
+axin = ax.inset_axes([0.13, 0.35, 0.32, 0.19])
+axin.plot(T_line, response(RAMP, T_line, H_exact), "0.3", lw=1.2)
+for scale, c in HOLD_SCALES:
+    axin.plot(scale, response(RAMP, scale, H_exact), "o", color=c, mec="k", mew=0.5, ms=5)
+axin.set_xscale("log")
+axin.set(xlim=(0.6, 1.7e4), ylim=(0, 1))
+axin.set_xlabel(r"$\mathcal{T}$ (yrs)", fontsize=8, labelpad=1)
+axin.set_ylabel("TCR/TEQ", fontsize=8, labelpad=1)
+axin.tick_params(labelsize=7)
+axin.grid(alpha=0.25, lw=0.6)
+fig3b.tight_layout()
+fig3b.savefig("figures/held_ramp_continued_response.png", dpi=160)
+
+
 # --- Diffusive ocean vs the matched 1-box, timescale by timescale -------------
 # Each T gets a 1-box with c = lambda*T (relaxation time T, depth H): solid =
 # diffusive, dashed = 1-box, same colour per T. (c) and (d) divide each model by

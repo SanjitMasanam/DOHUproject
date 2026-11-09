@@ -1002,7 +1002,8 @@ def beck_slab_figure(p):
 
 HELD_TAU_MAX = 100.0   # held_wmghg_figure: last fixed-tau profile slice
 HELD_SCALES = [(5, C_VERM), (80, C_GREEN), (200, C_BLUE), (1200, C_PINK), (10000, C_ORANGE)]
-LINEAR_PROFILE_TAUS = [5.0, 10.0, 20.0]       # held_linear_figure (c); within the T = 5 yr run's range
+LINEAR_PROFILE_TAUS = [0.25, 1.0, 5.0, 14.0]  # held_linear_figure (c)-(e); within the T = 5 yr run's range
+LINEAR_PROFILE_COLORS = ["#9467bd", "#d62728", "#ff7f0e", "#e377c2"]
 
 
 def held_params(p, scale, t_final, z_floor=None):
@@ -1046,9 +1047,13 @@ def energy_budget_figure(p):
     Figure: (a) surface theta vs tau on a linear axis, a single curve with
     each run covering its own tau range, against the analytic h(0, tau);
     (b) one panel per run of every profile theta(zeta = z/H), coloured by tau,
-    which must collapse across runs; (c) isotherms: the depth zeta reached by
-    fixed theta levels vs tau, numeric (from (b)'s run) against Held's
-    h(zeta, tau) (dashed).
+    which must collapse across runs; below (b), at a few tau, (c) the
+    downward diffusive heat flux -D dtheta/dz = -lam dtheta/dzeta and (d) the
+    curvature d2theta/dzeta2 = H^2 d2theta/dz2 (= dtheta/dtau, the local
+    warming rate), numeric against the derivatives of h (dashed); below those,
+    (e) and (f) the depth zeta_5(tau) at which the (c) and (d) profiles have
+    decayed to 5% of their max, out to tau = 100, against the analytic depth
+    and its tau -> 0 and tau -> inf sqrt(tau) limits.
     """
     section("CHECK 9: energy conservation vs depth (no slab, semi-infinite, step forcing F2X, 4 timescales)")
     forcing = lambda t: np.full_like(t, F2X, dtype=float)
@@ -1102,9 +1107,79 @@ def energy_budget_figure(p):
     rb = solve_model(replace(held_params(p, scale_b, TAU_MAX * T_b), forcing=forcing), t_eval=tau_b * T_b)
     zeta_b = rb["z"] / (rb["p"].D / rb["p"].lam)
 
-    fig = plt.figure(figsize=(12, 15.5))
-    gs = fig.add_gridspec(3, 2, height_ratios=[1.0, 1.2, 1.0], width_ratios=[1.0, 0.025])
-    ax = fig.add_subplot(gs[0, 0])
+    # (c) downward diffusive flux -D dtheta/dz on the cell faces (second order
+    # there), from (b)'s run. Since H = D/lam it is -lam dtheta/dzeta, so it too
+    # depends only on (zeta, tau). Analytic: theta = (F/lam) h, and the
+    # e^(-x^2)/sqrt(pi tau) terms of dh/dzeta cancel, leaving
+    # -F dh/dzeta = F e^(zeta+tau) erfc(x + sqrt(tau)), x = zeta/(2 sqrt(tau));
+    # at zeta = 0 this is F - lam*theta(0).
+    from scipy.special import erfcx
+    tau_prof = [0.25, 1.0, 4.0, TAU_MAX]
+    j_prof = [np.abs(tau_b - tau).argmin() for tau in tau_prof]
+    flux_b = -rb["p"].D * np.diff(rb["theta"], axis=0) / rb["dz"]
+    zeta_f = (zeta_b[1:] + zeta_b[:-1]) / 2
+    def flux_ana(zeta, tau):
+        x = zeta / (2 * np.sqrt(tau))
+        return F2X * erfcx(x + np.sqrt(tau)) * np.exp(-x**2)
+    err = max(np.abs(flux_b[:, j] - flux_ana(zeta_f, tau_b[j])).max() for j in j_prof)
+    check(f"  flux profiles at tau = {tau_prof}: max |numeric - analytic| = {err:.2e} W/m^2",
+          err < 1e-2 * F2X, "tol 1% of F2X")
+
+    # (d) curvature d2theta/dzeta2 = H^2 d2theta/dz2 at the interior nodes. In
+    # the interior dtheta/dt = kappa d2theta/dz2, so it is also dtheta/dtau.
+    # Analytic: differentiating dh/dzeta = -e^(-x^2) erfcx(x + sqrt(tau)) once
+    # more gives d2h/dzeta2 = e^(-x^2) (1/sqrt(pi tau) - erfcx(x + sqrt(tau))) > 0,
+    # which at zeta = 0 is dh(0, tau)/dtau, the slope of (a).
+    dzeta = zeta_b[1] - zeta_b[0]
+    curv_b = (rb["theta"][2:] - 2 * rb["theta"][1:-1] + rb["theta"][:-2]) / dzeta**2
+    zeta_i = zeta_b[1:-1]
+    def curv_ana(zeta, tau):
+        x = zeta / (2 * np.sqrt(tau))
+        return th_eq * np.exp(-x**2) * (1 / np.sqrt(np.pi * tau) - erfcx(x + np.sqrt(tau)))
+    err = max(np.abs(curv_b[:, j] - curv_ana(zeta_i, tau_b[j])).max() for j in j_prof)
+    check(f"  curvature profiles at tau = {tau_prof}: max |numeric - analytic| = {err:.2e} C",
+          err < 1e-2 * th_eq, "tol 1% of F2X/lam")
+
+    # (e), (f) penetration depth zeta_5(tau): the deepest zeta at which the (c)
+    # flux / (d) curvature profile has decayed to 5% of its max over zeta
+    # (for (d) the max is interior; this is the deep-side crossing), linearly
+    # interpolated between nodes, from a run of (b)'s T out to TAU_E_MAX.
+    # Analytic: the same on a fine zeta grid. Both profiles depend on
+    # x = zeta/(2 sqrt(tau)) alone in two limits, giving zeta_5 = 2 x_5 sqrt(tau):
+    #   tau -> 0:   flux -> F erfc(x), x_5 = erfcinv(0.05);
+    #               curvature -> e^(-x^2)/sqrt(pi tau), x_5 = sqrt(ln 20);
+    #   tau -> inf: erfcx(y) ~ 1/(sqrt(pi) y), so flux -> e^(-x^2) relative to
+    #               the surface, x_5 = sqrt(ln 20); curvature -> x e^(-x^2)/(sqrt(pi) tau),
+    #               peaked at x = 1/sqrt(2), x_5 its deep root at 5% of that peak.
+    from scipy.optimize import brentq
+    from scipy.special import erfcinv
+    FRAC, TAU_E_MAX = 0.05, 100.0
+    def zeta_frac(zeta, prof):
+        thr = FRAC * prof.max()
+        k = np.nonzero(prof >= thr)[0][-1]
+        return zeta[k] + (thr - prof[k]) * (zeta[k + 1] - zeta[k]) / (prof[k + 1] - prof[k])
+    tau_e = np.unique(np.concatenate([np.linspace(0.0, TAU_E_MAX, 1001)[1:], tau_prof]))
+    re = solve_model(replace(held_params(p, scale_b, TAU_E_MAX * T_b), forcing=forcing), t_eval=tau_e * T_b)
+    zeta_e = re["z"] / (re["p"].D / re["p"].lam)
+    flux_e = -re["p"].D * np.diff(re["theta"], axis=0) / re["dz"]
+    curv_e = (re["theta"][2:] - 2 * re["theta"][1:-1] + re["theta"][:-2]) / (zeta_e[1] - zeta_e[0])**2
+    zeta_fine = np.linspace(0.0, zeta_e[-1], 40001)
+    x_inf_curv = brentq(lambda x: x * np.exp(-x**2) - FRAC * np.exp(-0.5) / np.sqrt(2), 1 / np.sqrt(2), 10)
+    pen = {}
+    for name, zeta, prof, ana, x_0, x_inf in [
+            ("flux", (zeta_e[1:] + zeta_e[:-1]) / 2, flux_e, flux_ana, erfcinv(FRAC), np.sqrt(np.log(1 / FRAC))),
+            ("curvature", zeta_e[1:-1], curv_e, curv_ana, np.sqrt(np.log(1 / FRAC)), x_inf_curv)]:
+        num = np.array([zeta_frac(zeta, prof[:, j]) for j in range(tau_e.size)])
+        an = np.array([zeta_frac(zeta_fine, ana(zeta_fine, tau)) for tau in tau_e])
+        pen[name] = (num, an, 2 * x_0, 2 * x_inf)
+        keep = tau_e >= tau_prof[0]
+        err = np.abs(num - an)[keep].max() / an[keep].min()
+        check(f"  {name} 5% depth, tau in [{tau_prof[0]}, {TAU_E_MAX:g}]: "
+              f"max |numeric - analytic| / min(zeta_5) = {err:.2e}", err < 2e-2, "tol 2%")
+
+    fig = plt.figure(figsize=(12, 20))
+    gs = fig.add_gridspec(4, 2, height_ratios=[1.0, 1.2, 1.0, 0.9])
+    ax = fig.add_subplot(gs[0, :])
     for (r, H, F_int, kappa, c, scale, rs), lw in zip(runs, [7, 5, 3.5, 2]):
         zH = r["p"].D / r["p"].lam
         tau_r = r["t"] / (scale * YEAR)
@@ -1123,7 +1198,7 @@ def energy_budget_figure(p):
     ax.legend(frameon=False, fontsize=9, loc="lower right")
     style_axes(ax)
 
-    ax_p = fig.add_subplot(gs[1, 0])
+    ax_p = fig.add_subplot(gs[1, :])
     segments = [np.column_stack([rb["theta"][:, j], zeta_b]) for j in range(tau_b.size)]
     lc = LineCollection(segments, cmap="viridis", norm=plt.Normalize(0.0, TAU_MAX),
                         array=tau_b, linewidths=1.2)
@@ -1137,33 +1212,59 @@ def energy_budget_figure(p):
     ax_p.set_title(rf"(b) depth-time evolution, the same for every $\mathcal{{T}}$ "
                    rf"(computed with $\mathcal{{T}}$ = {scale_b} yr); red: integer $\tau$")
     style_axes(ax_p)
-    cbar = fig.colorbar(lc, cax=fig.add_subplot(gs[1, 1]))
+    cbar = fig.colorbar(lc, ax=ax_p, fraction=0.04, pad=0.02)
     cbar.ax.hlines(tau_int, 0, 1, color="r", lw=1.2)
     cbar.set_label(r"$\tau = t/\mathcal{T}$")
 
-    # (c) isotherms zeta(tau) at fixed theta: theta decreases monotonically with
-    # depth, so each level is a single curve that deepens with tau.
-    ax_c = fig.add_subplot(gs[2, 0])
-    th_levels = [0.1, 0.5, 1.0, 1.5, 2.0, 2.5]
-    th_colors = plt.cm.plasma(np.linspace(0.0, 0.85, len(th_levels)))
-    zeta_max = 4 * np.sqrt(TAU_MAX)
-    ax_c.contour(tau_b, zeta_b, rb["theta"], levels=th_levels, colors=th_colors, linewidths=2.5)
-    zz = np.linspace(0.0, zeta_max, 300)
-    tt = np.linspace(1e-6, TAU_MAX, 401)
-    th_ana = F2X / p.F0 * analytic_diffusive_profile(zz[:, None] * H_ref, tt[None, :] * H_ref**2 / pr.kappa, pr)
-    ax_c.contour(tt, zz, th_ana, levels=th_levels, colors="k", linewidths=1, linestyles="--")
-    for th, c in zip(th_levels, th_colors):
-        ax_c.plot([], [], color=c, lw=2.5, label=rf"$\theta$ = {th:g} $\degree$C")
-    ax_c.plot([], [], color="k", lw=1, ls="--", label=r"analytic, $h(\zeta, \tau)$")
-    # z = V_beta t with V_beta = lam/rho_cp: H = kappa/V_beta and T = kappa/V_beta^2,
-    # so in (zeta, tau) it is zeta = tau.
-    ax_c.plot([0, TAU_MAX], [0, TAU_MAX], color="0.45", lw=1.5, ls=":",
-              label=r"$z = \mathcal{V}_\beta t$, i.e. $\zeta = \tau$")
-    ax_c.set(xlim=(0, TAU_MAX), ylim=(zeta_max, 0), xlabel=r"$\tau = t/\mathcal{T}$",
-             ylabel=r"$\zeta = z/\mathcal{H}$",
-             title=rf"(c) isotherms: depth reached by fixed $\theta$ (computed with $\mathcal{{T}}$ = {scale_b} yr)")
-    ax_c.legend(frameon=False, fontsize=9, loc="lower left", ncol=2)
-    style_axes(ax_c)
+    # (c), (d): depth on the x axis, over the same zeta range as (b).
+    ax_f = fig.add_subplot(gs[2, 0])
+    prof_colors = plt.cm.magma(np.linspace(0.15, 0.8, len(j_prof)))
+    for j, c in zip(j_prof, prof_colors):
+        ax_f.plot(zeta_f, flux_b[:, j], color=c, lw=2.5, label=rf"$\tau$ = {tau_b[j]:g}")
+        ax_f.plot(zeta_f, flux_ana(zeta_f, tau_b[j]), color="k", lw=1, ls="--")
+    ax_f.plot([], [], color="k", lw=1, ls="--", label=r"analytic, $-F\,\partial h/\partial\zeta$")
+    ax_f.set(xlim=(0, 4 * np.sqrt(TAU_MAX)), ylim=(0, 1.05 * F2X),
+             xlabel=r"$\zeta = z/\mathcal{H}$",
+             ylabel=r"$-\rho c_p \kappa\, \partial\theta/\partial z$ (W m$^{-2}$)",
+             title=r"(c) downward heat flux $= -\lambda\, \partial\theta/\partial\zeta$")
+    ax_f.legend(frameon=False, fontsize=9, loc="upper right")
+    style_axes(ax_f)
+
+    ax_d = fig.add_subplot(gs[2, 1], sharex=ax_f)
+    for j, c in zip(j_prof, prof_colors):
+        ax_d.plot(zeta_i, curv_b[:, j], color=c, lw=2.5, label=rf"$\tau$ = {tau_b[j]:g}")
+        ax_d.plot(zeta_i, curv_ana(zeta_i, tau_b[j]), color="k", lw=1, ls="--")
+    ax_d.plot([], [], color="k", lw=1, ls="--",
+              label=r"analytic, $(F/\lambda)\,\partial^2 h/\partial\zeta^2$")
+    ax_d.set_ylim(0, None)
+    ax_d.set(xlabel=r"$\zeta = z/\mathcal{H}$",
+             ylabel=r"$\partial^2\theta/\partial\zeta^2 = \mathcal{H}^2\,\partial^2\theta/\partial z^2$ ($\degree$C)",
+             title=r"(d) curvature $= \partial\theta/\partial\tau$ (local warming rate)")
+    ax_d.legend(frameon=False, fontsize=9, loc="upper right")
+    style_axes(ax_d)
+
+    # (e), (f): 5% penetration depth of (c), (d) vs tau, with both limits.
+    for col, (name, sym, letter) in enumerate([("flux", r"-\partial\theta/\partial\zeta", "e"),
+                                               ("curvature", r"\partial^2\theta/\partial\zeta^2", "f")]):
+        num, an, c_0, c_inf = pen[name]
+        ax_e = fig.add_subplot(gs[3, col])
+        ax_e.plot(tau_e, num, color="0.35", lw=2.5, label="numeric")
+        ax_e.plot(tau_e, an, color="k", lw=1, ls="--", label="analytic")
+        ax_e.plot(tau_e, c_0 * np.sqrt(tau_e), color="k", lw=1, ls=":",
+                  label=rf"$\tau \to 0$ limit, {c_0:.2f}$\sqrt{{\tau}}$")
+        ax_e.plot(tau_e, c_inf * np.sqrt(tau_e), color="k", lw=1, ls="-.",
+                  label=rf"$\tau \to \infty$ limit, {c_inf:.2f}$\sqrt{{\tau}}$")
+        for j, c in zip(j_prof, prof_colors):
+            k = np.searchsorted(tau_e, tau_b[j])
+            ax_e.plot(tau_e[k], num[k], "o", color=c, ms=7, zorder=3, clip_on=False,
+                      label=rf"$\tau$ = {tau_b[j]:g}")
+        ax_e.set(xlim=(0, TAU_E_MAX), ylim=(0, None), xlabel=r"$\tau = t/\mathcal{T}$",
+                 ylabel=rf"$\zeta_{{5\%}}$, where ${sym}$ = {FRAC:g}$\,\times$max",
+                 title=rf"({letter}) depth where the ({'c' if letter == 'e' else 'd'}) {name} "
+                       rf"falls to {FRAC:.0%} of its max")
+        ax_e.legend(frameon=False, fontsize=9, loc="lower right")
+        style_axes(ax_e)
+
     fig.tight_layout(h_pad=3)
     savefig(fig, "relaxation_time_check.png")
 
@@ -1394,24 +1495,37 @@ def held_linear_figure(p):
         the analytic g(zeta, tau) as dashed contours. The check compares each
         run's whole (zeta, tau) field with g.
     (c) depth profiles at LINEAR_PROFILE_TAUS (dotted lines on (b)) vs g.
+    (d), (e) at the same tau, with zeta on the x axis: the downward diffusive
+        flux -D dtheta/dz = -lam dtheta/dzeta and the curvature
+        d2theta/dzeta2 = dtheta/dtau, both per unit T so the runs collapse, vs
+        -dg/dzeta and d2g/dzeta2 = dg/dtau = h (dashed).
     """
     section("CHECK 16: linear-ramp response, numeric vs analytic (no slab, semi-infinite)")
     t_final = 100.0 * YEAR
-    plot_yrs = np.arange(0.0, t_final / YEAR + 1)
+    # Yearly output, plus the T = 5 yr run's times for LINEAR_PROFILE_TAUS.
+    plot_yrs = np.unique(np.concatenate([np.arange(0.0, t_final / YEAR + 1),
+                                         np.array(LINEAR_PROFILE_TAUS) * HELD_SCALES[0][0]]))
     ramp_knots = np.array([0.0, t_final]), np.array([0.0, F2X * t_final / T_2X])
     forcing = lambda t: F2X * t / T_2X
     j70 = np.searchsorted(plot_yrs, T_2X / YEAR)
 
-    def ramp_field(zeta, taus, n=4000):
+    def ramp_field(zeta, taus, n=4000, flux=False):
         """g(zeta, tau) = Int_0^tau h(zeta, u) du on the grid zeta x taus, by a
         cumulative trapezoid on one log-graded u grid (h ~ sqrt(u) near the
         surface) up to max(taus), interpolated to each tau. h is
-        analytic_diffusive_profile with dT_eq divided out."""
+        analytic_diffusive_profile with dT_eq divided out. With flux, returns
+        -dg/dzeta instead, integrating -dh/dzeta = e^(-x^2) erfcx(x + sqrt(u)),
+        x = zeta/(2 sqrt(u)) (derived in energy_budget_figure)."""
+        from scipy.special import erfcx
         H, T = p.D / p.lam, (p.D / p.lam)**2 / p.kappa
         taus = np.atleast_1d(taus)
         u = np.concatenate([[0.0], np.geomspace(1e-8 * taus[taus > 0].min(), taus.max(), n)])
-        h = analytic_diffusive_profile(np.atleast_1d(zeta)[:, None] * H,
-                                       np.maximum(u, 1e-300)[None, :] * T, p) / p.dT_eq
+        zeta, uu = np.atleast_1d(zeta)[:, None], np.maximum(u, 1e-300)[None, :]
+        if flux:
+            x = zeta / (2 * np.sqrt(uu))
+            h = np.exp(-x**2) * erfcx(x + np.sqrt(uu))
+        else:
+            h = analytic_diffusive_profile(zeta * H, uu * T, p) / p.dT_eq
         g = cumulative_trapezoid(h, u, axis=1, initial=0.0)
         return np.array([np.interp(taus, u, row) for row in g])
 
@@ -1441,8 +1555,8 @@ def held_linear_figure(p):
               "tol 0.01 TCR")
         runs.append((r, ana, c, scale, zeta, tau))
 
-    fig = plt.figure(figsize=(15, 9))
-    gs = fig.add_gridspec(2, len(HELD_SCALES))
+    fig = plt.figure(figsize=(15, 13))
+    gs = fig.add_gridspec(3, 2 * len(HELD_SCALES), height_ratios=[1.0, 1.0, 0.9])
     ax_a = fig.add_subplot(gs[0, :])
     # The runs overlap in tau on one curve, so earlier ones are drawn wider.
     for (r, ana, c, scale, *_), lw in zip(runs, [8, 6, 4.5, 3, 1.5]):
@@ -1462,7 +1576,7 @@ def held_linear_figure(p):
     # zeta = z/sqrt(kappa T) = z/H; theta/T = rate*g(zeta, tau) for every run,
     # so the runs tile one field. Largest tau range first: the shorter-T runs'
     # wider ranges are overdrawn at small tau by the longer-T runs.
-    ax_b = fig.add_subplot(gs[1, :-1])
+    ax_b = fig.add_subplot(gs[1, :-2])
     tau_max = plot_yrs[-1] / HELD_SCALES[0][0]
     zeta_max = 2 * np.sqrt(tau_max)
     vmax = max(r["dT"].max() / scale for r, _, _, scale, *_ in runs)
@@ -1483,10 +1597,10 @@ def held_linear_figure(p):
     style_axes(ax_b)
 
     # (c) depth profiles at the tau marked on (b), numeric from the T = 5 yr run
-    # (the only one reaching tau = 20) vs the analytic g (dashed).
-    ax_c = fig.add_subplot(gs[1, -1], sharey=ax_b)
+    # (the only one reaching tau = 14) vs the analytic g (dashed).
+    ax_c = fig.add_subplot(gs[1, -2:], sharey=ax_b)
     r, _, _, scale, zeta, tau = runs[0]
-    for tau_c, c in zip(LINEAR_PROFILE_TAUS, ["#d62728", "#ff7f0e", "#e377c2"]):
+    for tau_c, c in zip(LINEAR_PROFILE_TAUS, LINEAR_PROFILE_COLORS):
         j = np.argmin(np.abs(tau - tau_c))
         ax_c.plot(r["theta"][:, j] / scale, zeta, color=c, lw=2.5, label=rf"$\tau$ = {tau_c:g}")
         ax_c.plot(rate * ramp_field(zz, tau_c)[:, 0], zz, color="k", lw=1, ls="--")
@@ -1497,11 +1611,48 @@ def held_linear_figure(p):
     ax_c.tick_params(labelleft=False)
     ax_c.legend(frameon=False, fontsize=8, loc="lower right")
     style_axes(ax_c)
+
+    # (d) downward flux -D dtheta/dz on the cell faces and (e) curvature
+    # d2theta/dzeta2 at the interior nodes, from the same run, per unit T:
+    # theta = A_T g, so flux/T = -(F2X/T_2X) dg/dzeta [W m^-2 yr^-1] and
+    # curvature/T = rate * d2g/dzeta2 = rate * dg/dtau = rate * h [C/yr].
+    # At zeta = 0 the flux is F(t) - lam*theta_0.
+    ax_d = fig.add_subplot(gs[2, :len(HELD_SCALES)])
+    ax_e = fig.add_subplot(gs[2, len(HELD_SCALES):], sharex=ax_d)
+    H_r = r["p"].D / r["p"].lam
+    flux = -r["p"].D * np.diff(r["theta"], axis=0) / r["dz"] / scale
+    zeta_f = (zeta[1:] + zeta[:-1]) / 2
+    curv = (r["theta"][2:] - 2 * r["theta"][1:-1] + r["theta"][:-2]) / (zeta[1] - zeta[0])**2 / scale
+    zeta_i = zeta[1:-1]
+    flux_rate = F2X / (T_2X / YEAR)
+    for tau_c, c in zip(LINEAR_PROFILE_TAUS, LINEAR_PROFILE_COLORS):
+        j = np.argmin(np.abs(tau - tau_c))
+        flux_ana = flux_rate * ramp_field(zeta_f, tau[j], flux=True)[:, 0]
+        curv_ana = rate * analytic_diffusive_profile(zeta_i * H_r, tau[j] * H_r**2 / r["p"].kappa, r["p"]) / r["p"].dT_eq
+        check(f"  tau = {tau[j]:g}: max |numeric - analytic| flux = {np.abs(flux[:, j] - flux_ana).max() / flux_ana.max():.2e}, "
+              f"curvature = {np.abs(curv[:, j] - curv_ana).max() / curv_ana.max():.2e} of max",
+              max(np.abs(flux[:, j] - flux_ana).max() / flux_ana.max(),
+                  np.abs(curv[:, j] - curv_ana).max() / curv_ana.max()) < 1e-2, "tol 1% of the profile max")
+        ax_d.plot(zeta_f, flux[:, j], color=c, lw=2.5, label=rf"$\tau$ = {tau_c:g}")
+        ax_d.plot(zeta_f, flux_ana, color="k", lw=1, ls="--")
+        ax_e.plot(zeta_i, curv[:, j], color=c, lw=2.5, label=rf"$\tau$ = {tau_c:g}")
+        ax_e.plot(zeta_i, curv_ana, color="k", lw=1, ls="--")
+    ax_d.plot([], [], color="k", lw=1, ls="--", label=r"analytic, $-\partial g/\partial\zeta$")
+    ax_e.plot([], [], color="k", lw=1, ls="--", label=r"analytic, $\partial^2 g/\partial\zeta^2 = h(\zeta, \tau)$")
+    ax_d.set(xlim=(0, zeta_max), ylim=(0, None), xlabel=r"$\zeta = z/\sqrt{\kappa \mathcal{T}}$",
+             ylabel=r"$-\rho c_p \kappa\, \partial\theta/\partial z \,/\, \mathcal{T}$ (W m$^{-2}$ yr$^{-1}$)",
+             title=r"(d) downward heat flux $/\,\mathcal{T}$ $= -\lambda\, \partial\theta/\partial\zeta \,/\, \mathcal{T}$")
+    ax_e.set(ylim=(0, None), xlabel=r"$\zeta = z/\sqrt{\kappa \mathcal{T}}$",
+             ylabel=r"$\partial^2\theta/\partial\zeta^2 \,/\, \mathcal{T}$ ($\degree$C yr$^{-1}$)",
+             title=r"(e) curvature $/\,\mathcal{T}$ $= \partial\theta/\partial\tau \,/\, \mathcal{T}$ (local warming rate)")
+    for ax in (ax_d, ax_e):
+        ax.legend(frameon=False, fontsize=9, loc="upper right")
+        style_axes(ax)
     fig.text(0.5, 0.012, rf"$\theta/\mathcal{{T}} = [F_{{2x}}/(\lambda\,T_{{2x}})]\;g(\zeta,\tau)$, "
              rf"$F_{{2x}}/(\lambda T_{{2x}})$ = {rate:.3f} $\degree$C yr$^{{-1}}$ ($T_{{2x}}$ = 70 yr), "
              r"$g(\zeta,\tau) = \int_0^\tau h(\zeta,u)\,du$: all runs collapse onto it",
              ha="center", fontsize=9)
-    fig.tight_layout(h_pad=3, rect=(0, 0.04, 1, 1))
+    fig.tight_layout(h_pad=3, rect=(0, 0.03, 1, 1))
     savefig(fig, "held_linear_response_numeric.png")
 
 

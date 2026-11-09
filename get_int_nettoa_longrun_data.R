@@ -1,8 +1,40 @@
 library(ncdf4)
 datadir = "/archive/jpd/longrunmip"
 homedir = "/home/Sanjit.Masanam/Documents/DeepOceanHeatUptakeProject"
-models = c("CCSM3","CESM1","CNRMCM6","ECEARTH","ECHAM5","GISSE2R","IPSLCM5A","MIROC3","HadGEM2","MPIESM11") # exclude FAMOUS, HadCM3, MPIESM12 for now
+models = c("CCSM3","CESM1","CNRMCM6","ECEARTH","ECHAM5","GISSE2R","IPSLCM5A","MIROC3","HadGEM2","MPIESM11", # exclude FAMOUS, HadCM3, MPIESM12 for now
+           "CM3","ESM2M","ESM2G") # GFDL, from gfdldir below
 setwd(datadir)
+
+# GFDL runs (Nadir Jeevanjee). These are not abrupt-4xCO2: CM3 and ESM2M are abrupt 2xCO2, ESM2G
+# ramps CO2 at 1%/yr to 4x and then holds it. They are still stored under the "4xCO2" key, so
+# the Python loaders need no change, with co2_multiple / ramp_years recorded per model below.
+# Files are global means (lat = lon = 1); {var} is replaced by the variable name, for ESM2G's
+# one-file-per-variable layout.
+gfdldir     = "/work/Nadir.Jeevanjee/23sensitivity"
+gfdl_models = c("CM3","ESM2M","ESM2G")
+gfdl_files  = list(
+   CM3   = list(piControl = "CM3/CM3_CTL_TS.nc",                  "4xCO2" = "CM3/CM3_2X_TS.nc"),
+   ESM2M = list(piControl = "ESM2M/ESM2M_CTL_TS.nc",              "4xCO2" = "ESM2M/ESM2M_2X_TS.nc"),
+   ESM2G = list(piControl = "ESM2G/{var}_ESM2G_pi-control_C2.nc", "4xCO2" = "ESM2G/{var}_ESM2G-C2_1pct-co2_4x_U2.nc"))
+co2_multiple = c(CM3 = 2, ESM2M = 2)              # default 4
+ramp_years   = c(ESM2G = log(4)/log(1.01))        # 1%/yr to 4x = 139.3 yr; default 0 (abrupt)
+
+# One GFDL variable as an annual series. Annual records pass through; monthly ones (365_day
+# calendar, assumed to start in January) are averaged into years weighted by month length.
+read_gfdl_var = function(pattern, var){
+   file = file.path(gfdldir, gsub("{var}", var, pattern, fixed = TRUE))
+   nc   = nc_open(file)
+   x    = as.vector(ncvar_get(nc, var))
+   dt   = median(diff(ncvar_get(nc, "time")))     # days
+   nc_close(nc)
+   if (abs(dt - 365) < 1) return(x)
+   if (dt >= 28 && dt <= 31){
+      ndays = c(31,28,31,30,31,30,31,31,30,31,30,31)
+      nyr   = length(x) %/% 12
+      return(colSums(matrix(x[1:(12*nyr)], nrow = 12) * ndays) / 365)
+   }
+   stop(paste("Unexpected time step of", dt, "days in", file))
+}
 
 tcr_vals  = c(1.5, 1.7, 2.1, NA, 2.2, 1.5, 2.0, 2.1, 2.5, 2) # from Google sheet
 ecs_vals  = c(2.7, 2.9, 4.6, 3.3, 3.4, 2.2, 4.1, 4, 4.6 ,3.6)
@@ -57,7 +89,13 @@ for (n_model in 1:Nmodels){
     for (expt in expts){
     	print(paste("Expt",expt))
     	int_nettoa_longrun_data[[model]][[expt]] = list()
-	if ( !((model == "HadGEM2") | (model == "MPIESM11")) ){
+	if (model %in% gfdl_models){
+	   pattern = gfdl_files[[model]][[expt]]
+	   int_nettoa_longrun_data[[model]][[expt]]$file   = file.path(gfdldir, pattern)
+	   int_nettoa_longrun_data[[model]][[expt]]$T2M    = read_gfdl_var(pattern, "t_ref")
+	   int_nettoa_longrun_data[[model]][[expt]]$NETTOA = read_gfdl_var(pattern, "swdn_toa") -
+	      read_gfdl_var(pattern, "swup_toa") - read_gfdl_var(pattern, "olr")
+	} else if ( !((model == "HadGEM2") | (model == "MPIESM11")) ){
 	   file = eval(as.name(paste(model,expt,"nc",sep="_")))
 	   int_nettoa_longrun_data[[model]][[expt]]$file = file
 	   nc   = nc_open(file)
@@ -66,13 +104,22 @@ for (n_model in 1:Nmodels){
 	      int_nettoa_longrun_data[[model]][[expt]][[var]] = ncvar_get(nc,var)
 	   }
 	} else {
-    	   for (var in vars){
+    	   for (var in setdiff(vars, "TAX_YEARS")){ # only T2M/NETTOA files exist for these two
 	      file = eval(as.name(paste(model,expt,var,"nc",sep="_")))
 	      nc   = nc_open(file)
 	      int_nettoa_longrun_data[[model]][[expt]][[var]] = ncvar_get(nc,var)
 	   }
-        } # if not HadGEM or MPIESM
+        } # if GFDL / not HadGEM or MPIESM
     } # expt
+
+    # Perturbed-run forcing, read by the diffusive fit (missing = abrupt 4xCO2).
+    int_nettoa_longrun_data[[model]]$co2_multiple = if (model %in% names(co2_multiple)) co2_multiple[[model]] else 4
+    int_nettoa_longrun_data[[model]]$ramp_years   = if (model %in% names(ramp_years))   ramp_years[[model]]   else 0
+
+    d = int_nettoa_longrun_data[[model]]
+    print(sprintf("  piControl %d yr: mean T2M %.2f, NETTOA %.2f W/m2 | perturbed (%gx CO2, ramp %.1f yr) %d yr: NETTOA yrs 1-5 %.2f W/m2",
+                  length(d$piControl$T2M), mean(d$piControl$T2M, na.rm = TRUE), mean(d$piControl$NETTOA, na.rm = TRUE),
+                  d$co2_multiple, d$ramp_years, length(d[["4xCO2"]]$T2M), mean(d[["4xCO2"]]$NETTOA[1:5], na.rm = TRUE)))
 } # model
 
 setwd(homedir)

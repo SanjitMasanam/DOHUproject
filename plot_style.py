@@ -155,11 +155,10 @@ def make_model_grid_with_ratio(
 ):
    """Like make_model_grid, but each model panel is a (main, ratio) pair of
    axes stacked vertically and sharing the x-axis -- the ratio axis is
-   short and sits directly beneath its main axis."""
+   short and sits directly beneath its main axis. Rows are added as needed for
+   any number of models; slots past the last model are left empty."""
    nmodels = len(models)
-   if nmodels % ncols != 0:
-      raise ValueError(f"Expected models divisible by ncols={ncols}, got {nmodels}.")
-   nmodel_rows = nmodels // ncols
+   nmodel_rows = int(np.ceil(nmodels / ncols))
 
    fig = plt.figure(
       figsize=(width_per_ax * ncols, height_per_ax * nmodel_rows * (1 + ratio_height_frac)),
@@ -194,9 +193,13 @@ def make_model_grid_with_ratio(
    return fig, np.asarray(main_axs), np.asarray(ratio_axs)
 
 
-def make_model_grid_3d(models, title=None, width_per_ax=6, height_per_ax=5, ncols=4, nrows=2):
-   """4x2 grid of 3D axes (mirrors make_model_grid's layout), for the
-   (T, H, N) radiative-regression scatter + fit-plane panels."""
+def make_model_grid_3d(models, title=None, width_per_ax=6, height_per_ax=5, ncols=4, nrows=None):
+   """Grid of 3D axes (4x2 for 8 models, mirroring make_model_grid), for the
+   (T, H, N) radiative-regression scatter + fit-plane panels. nrows=None sizes
+   the grid to the model count and hides the trailing unused axes."""
+   nmodels = len(models)
+   if nrows is None:
+      nrows = int(np.ceil(nmodels / ncols))
    fig, axs = plt.subplots(
       nrows, ncols,
       figsize=(width_per_ax * ncols, height_per_ax * nrows),
@@ -205,7 +208,10 @@ def make_model_grid_3d(models, title=None, width_per_ax=6, height_per_ax=5, ncol
    fig.subplots_adjust(left=0.02, right=0.95, bottom=0.03, top=0.92, wspace=0.10, hspace=0.10)
    if title:
       fig.suptitle(title, fontsize=SUPTITLE_FONTSIZE, fontweight="bold")
-   return fig, np.asarray(axs).ravel()
+   axs = np.asarray(axs).ravel()
+   for ax in axs[nmodels:]:
+      ax.set_visible(False)
+   return fig, axs
 
 
 def plot_regression_3d(ax, T, H, N, F, lam, eps, model, cmap="RdBu_r", resid_norm=None, s=12):
