@@ -7,12 +7,8 @@
 #        --resolve-only   only find and check the input files (no reading: needs neither ncdf4 nor NCO)
 #        --models A,B     only these labels (see cmip_runs below)
 #        --redo           recompute the selected models even if they have a checkpoint
-#        --jobs N         read N files at once (default n_jobs below); each line "read ..." gives
-#                         the seconds per variable, to see what is slow
 #
-# Models can also run as separate processes; each saves its own checkpoint, and every process
-# writes the bundle with all models finished so far (the last one to end has them all):
-#   (bash) for m in CCSM3 CESM1 CNRMCM6 ...; do Rscript get_int_nettoa_longrun_data.R cmip_1pctCO2 --models $m --jobs 2 > log_$m.txt 2>&1 & done; wait
+# Each "read ..." line gives the files, MB on disk and seconds per variable, to see what is slow.
 #
 # Each model that finishes is checkpointed to cmip_ckpt_dir, so a rerun after an interruption
 # (or a failure) only does the models still missing. A checkpoint is reused only while that
@@ -33,9 +29,6 @@ resolve_only = "--resolve-only" %in% args
 redo         = "--redo" %in% args
 i_models     = match("--models", args)
 model_subset = if (is.na(i_models)) NULL else strsplit(args[i_models + 1], ",")[[1]]
-i_jobs       = match("--jobs", args)
-jobs_arg     = if (is.na(i_jobs)) NA_integer_ else suppressWarnings(as.integer(args[i_jobs + 1]))
-if (!is.na(i_jobs) && (is.na(jobs_arg) || jobs_arg < 1)) stop("--jobs needs a positive number, e.g. --jobs 4")
 if (!dataset %in% c("longrunmip", "cmip_1pctCO2"))
    stop("unknown dataset '", dataset, "': use longrunmip (default) or cmip_1pctCO2")
 if (!is.null(model_subset) && anyNA(model_subset)) stop("--models needs a value, e.g. --models CESM1,CM3")
@@ -54,7 +47,6 @@ cmip_root    = c(cmip3 = file.path(uda, "cmip3"), cmip5 = file.path(uda, "cmip5"
 min_years    = 100                                # both experiments must have at least this many
 max_years    = 100   # ...and keep only their first max_years (Inf = all); files past it are not read
 spatial_mean = "nco"   # "nco": ncap2 does the area mean (needs `module load nco`); "r": ncdf4 in R
-n_jobs       = if (is.na(jobs_arg)) 4L else jobs_arg   # files read at once (--jobs N); 1 = one by one
 cmip_vars    = c("tas", "rsdt", "rsut", "rlut")
 cmip_out     = "./data/int_netToa_1pctCO2.Rdata"
 cmip_ckpt_dir = "./data/cmip_1pctCO2_checkpoints"  # one <label>.rds per finished model (git-ignored)
@@ -446,20 +438,6 @@ cmip3_years = function(r, ctx){
    c(max(y0), max(y0) + max_years - 1)
 }
 
-# lapply over n_jobs forked workers. A worker's error is re-raised here (the first one in task
-# order), so failures read the same as in a serial run.
-par_map = function(xs, f){
-   if (n_jobs <= 1 || length(xs) <= 1) return(lapply(xs, f))
-   out = parallel::mclapply(xs, function(x) tryCatch(f(x), error = function(e) e),
-                            mc.cores = min(n_jobs, length(xs)), mc.preschedule = FALSE)
-   for (o in out){
-      if (inherits(o, "error")) stop(o)
-      if (inherits(o, "try-error") || is.null(o))
-         stop("a worker died without an error message (out of memory?); try a smaller --jobs", call. = FALSE)
-   }
-   out
-}
-
 # Monthly pieces (files in order) -> annual means from the first January, weighted by month length.
 annualise = function(pieces, ctx){
    x     = unlist(lapply(pieces, `[[`, "x"))
@@ -491,7 +469,7 @@ annualise = function(pieces, ctx){
 
 # Read, average and combine all variables of a resolved run.
 process_run = function(run, res){
-   # Every file of the run is one task, read n_jobs at a time, each only for the years it needs.
+   # Every file of the run, each read only for the years it needs.
    wall0 = proc.time()[["elapsed"]]
    tasks = list()
    for (ex in c("piControl", "1pctCO2")){
@@ -502,8 +480,8 @@ process_run = function(run, res){
          tasks[[length(tasks) + 1]] = list(ex = ex, v = v, file = f, years = yrs,
                                            ctx = paste(run$label, r$experiment, v))
    }
-   cat(sprintf("  reading %d file(s), %d at a time\n", length(tasks), min(n_jobs, length(tasks))))
-   got = par_map(tasks, function(tk){
+   cat(sprintf("  reading %d file(s)\n", length(tasks)))
+   got = lapply(tasks, function(tk){
       t0 = proc.time()[["elapsed"]]
       p  = read_global_mean(tk$file, tk$v, tk$ctx, tk$years)
       list(p = p, secs = proc.time()[["elapsed"]] - t0, mb = file.size(tk$file) / 1e6)
@@ -550,9 +528,8 @@ process_run = function(run, res){
                        member = r$tas$member,
                        file = unlist(lapply(cmip_vars, function(v) r[[v]]$files)))
    }
-   cat(sprintf("  read %d file(s) (%.0f MB on disk) in %.1f s wall; %.1f s summed over files\n",
-               length(got), sum(vapply(got, `[[`, 0, "mb")), proc.time()[["elapsed"]] - wall0,
-               sum(vapply(got, `[[`, 0, "secs"))))
+   cat(sprintf("  read %d file(s) (%.0f MB on disk) in %.1f s\n",
+               length(got), sum(vapply(got, `[[`, 0, "mb")), proc.time()[["elapsed"]] - wall0))
    pe = res[["1pctCO2"]]$experiment
    f  = expt_forcing[[paste(run$era, pe, sep = "/")]]
    if (is.null(f)) f = expt_forcing[[pe]]
@@ -682,7 +659,7 @@ if (dataset == "cmip_1pctCO2"){
          models = names(cmip_data); Nmodels = length(models)
          expts  = c("piControl", "1pctCO2"); vars = c("T2M", "NETTOA")
          int_nettoa_1pctCO2_data = cmip_data
-         tmp = paste0(cmip_out, ".tmp", Sys.getpid())   # atomic: parallel runs may save at once
+         tmp = paste0(cmip_out, ".tmp")   # atomic: an interruption never leaves a half-written bundle
          save(models, Nmodels, expts, vars, int_nettoa_1pctCO2_data, file = tmp)
          file.rename(tmp, cmip_out)
          cat("Saved", Nmodels, "model(s) to", cmip_out, "\n")
