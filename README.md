@@ -59,8 +59,7 @@ module load nco && Rscript get_int_nettoa_longrun_data.R cmip_1pctCO2 [--models 
 
 It reads monthly `tas`, `rsdt`, `rsut`, `rlut` and turns them into annual, cos-latitude-weighted
 global means (`T2M`, `NETTOA = rsdt − rsut − rlut`). It requires at least 100 years per
-experiment and keeps only the first 100 (`max_years`; months past that are never read), and prints
-the seconds spent reading each variable. It writes `data/int_netToa_1pctCO2.Rdata` (`int_nettoa_1pctCO2_data[[label]]$piControl` /
+experiment and writes `data/int_netToa_1pctCO2.Rdata` (`int_nettoa_1pctCO2_data[[label]]$piControl` /
 `$"1pctCO2"`). The label → archive mapping (`cmip_runs`) and the per-archive path templates are at the
 top of the script. CMIP5/6 have no exact match for several LongRunMIP versions: CESM1 → CCSM4 and
 MPIESM11 → MPI-ESM-LR are the nearest stand-ins. If a model fails (no matching files, a gap between
