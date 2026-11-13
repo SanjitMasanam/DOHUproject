@@ -33,7 +33,8 @@ from diffusive_common import (
 )
 from figure_paths import BUDGET, DPI_WIDE, RunLayout, figname
 from longrun_common import (
-   MODELS as LONGRUN_MODELS, add_test_argument, announce_test_mode, load_longrun_data,
+   EARTH_AREA, MODELS as LONGRUN_MODELS, OCEAN_HEAT_CAPACITY, SECONDS_PER_YEAR,
+   add_test_argument, announce_test_mode, load_longrun_data, perturbed_anomalies,
    select_models, sympy_prop_unc,
 )
 from pde_solver_1lyrEBM_diffusive import Params as PDEParams, solve_model as pde_solve_model, YEAR
@@ -226,18 +227,19 @@ def plot_ohc_vs_ts(figs, i, model, label, case, lmbda, kappa_pde, h_ml_pde, t2m,
    """Normalized OHC against T/T_eq: AOGCM years, and the fit integrated out to
    OHC_TS_EQUILIBRIUM_YEARS so it reaches (1, 1)."""
    T_eq, eps = case.T_eq, case.eps
-   ohc = (dc.EARTH_AREA * dc.SECONDS_PER_YEAR * np.cumsum(nettoa)) / (dc.OCEAN_HEAT_CAPACITY * NETTOA_SCALE)
+   to_joules = EARTH_AREA * SECONDS_PER_YEAR          # annual W/m^2 -> J
+   ohc = (to_joules * np.cumsum(nettoa)) / (OCEAN_HEAT_CAPACITY * NETTOA_SCALE)
 
    # Annual grid, so the cumulative sum of N is a time integral.
    eq_t = np.arange(1.0, OHC_TS_EQUILIBRIUM_YEARS + 1.0)
    case_eq = replace(case, t_final_years=OHC_TS_EQUILIBRIUM_YEARS)
    pde_T_eq = dc.surface_dT(case_eq, eq_t, kappa_pde, h_ml_pde) / T_eq
    H_eq = dc.heat_uptake(case_eq, eq_t, kappa_pde, h_ml_pde)
-   ohc_ref = dc.EARTH_AREA * RHO_CP * PDE_Z_MAX     # model column OHC_eq / T_eq [J/K]
+   ohc_ref = EARTH_AREA * RHO_CP * PDE_Z_MAX     # model column OHC_eq / T_eq [J/K]
    N_pde = (case.F_ref * ramp_frac(eq_t, case.ramp_years) - lmbda * (T_eq * pde_T_eq)
             - (eps - 1.0) * H_eq)
-   ohc_pred = (dc.EARTH_AREA * dc.SECONDS_PER_YEAR * np.cumsum(N_pde)) / ohc_ref
-   print(f"{model} OHC_eq diff-eps / reference:", ohc_ref / dc.OCEAN_HEAT_CAPACITY)
+   ohc_pred = (to_joules * np.cumsum(N_pde)) / ohc_ref
+   print(f"{model} OHC_eq diff-eps / reference:", ohc_ref / OCEAN_HEAT_CAPACITY)
 
    dc.plot_ohc_panel(figs, i, label, t2m/T_eq, ohc/T_eq, pde_T_eq, ohc_pred/T_eq)
 
@@ -419,14 +421,14 @@ def main():
          model_data = data.rx2(model)
          co2_multiple, ramp_years = model_meta(model_data)
          meta[model] = (model_label(model, co2_multiple, ramp_years), ramp_years)
-         t2m, nettoa = dc.perturbed_anomalies(model, model_data, expts, NETTOA_SCALE)
+         t2m, nettoa = perturbed_anomalies(model, model_data, expts, NETTOA_SCALE)
          rad[model] = fit_radiative(figs.step1.axs[i], df, model, meta[model][0],
                                     t2m, nettoa, ramp_years)
       print("Finished Step 1: Gregory params to df (Step 1 figures saved after Step 2)")
 
       for i, model in enumerate(fit_models):
          label, ramp_years = meta[model]
-         t2m, nettoa = dc.perturbed_anomalies(model, data.rx2(model), expts, NETTOA_SCALE,
+         t2m, nettoa = perturbed_anomalies(model, data.rx2(model), expts, NETTOA_SCALE,
                                               drop_nan_nettoa=False)
          fit_and_plot_model(figs, i, df, layout, run_type, model, label, ramp_years,
                             rad[model], t2m, nettoa, n_2d, args.li)

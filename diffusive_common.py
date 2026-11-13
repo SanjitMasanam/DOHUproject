@@ -7,8 +7,8 @@ eps (pde_solver_1lyrEBM_diffusive). Its TOA balance is
 
     N = F - lambda*T - (eps-1)*H,    H = diffusive flux out of the slab [W/m^2].
 
-Sections: constants, PDE solves, joint least-squares fit, data, figure set,
-per-model panels. Design notes are in docs/DECISIONS.md.
+Sections: constants, PDE solves, joint least-squares fit, table and progress,
+figure set, per-model panels. Design notes are in docs/DECISIONS.md.
 """
 from __future__ import annotations
 
@@ -37,9 +37,6 @@ from plot_style import (
 # =============================== Constants ===================================
 
 RHO_CP = 4.186e6                  # volumetric heat capacity of seawater [J m^-3 K^-1]
-EARTH_AREA = 5.1e14               # m^2
-SECONDS_PER_YEAR = 31536000
-OCEAN_HEAT_CAPACITY = 1.37e21 * 3850   # full ocean [J K^-1]
 EXPT = "4xCO2"                    # experiment token in every output filename
 
 # Stand-in for h_ml = 0, which is singular in the solver (division by c_ml).
@@ -409,31 +406,7 @@ def joint_fit_check(model, s):
    return verdict
 
 
-# ================================= Data ======================================
-
-def perturbed_anomalies(model, model_data, expts, nettoa_scale=1.0, n_years=None,
-                        drop_nan_nettoa=True):
-   """(T2M, NETTOA) of the perturbed run minus the piControl means.
-
-   n_years truncates both experiments first. With drop_nan_nettoa False only
-   years with NaN T2M are dropped, and only from T2M.
-   """
-   means = {}
-   for expt in expts:
-      expt_data = model_data.rx2(expt)
-      t2m = np.array(expt_data.rx2("T2M")).ravel()[:n_years]
-      nettoa = np.array(expt_data.rx2("NETTOA")).ravel()[:n_years] * nettoa_scale
-      good = np.isfinite(t2m) & np.isfinite(nettoa) if drop_nan_nettoa else np.isfinite(t2m)
-      if np.sum(good) / len(good) != 1:
-         print(f"{model} {expt} valid/all years:", np.sum(good) / len(good))
-      t2m = t2m[good]
-      if drop_nan_nettoa:
-         nettoa = nettoa[good]
-      if expt == "piControl":
-         means = {"t2m": np.mean(t2m), "nettoa": np.mean(nettoa)}
-      elif expt == "4xCO2":
-         return t2m - means["t2m"], nettoa - means["nettoa"]
-
+# ============================ Table and progress ==============================
 
 def set_row(df, model, values):
    """Write {column: value} for one model into the parameter table."""

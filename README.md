@@ -17,6 +17,7 @@ and plot styling with the others.
 | --- | --- |
 | [get_int_nettoa_longrun_data.R](get_int_nettoa_longrun_data.R) | Reads LongRunMIP NetCDF and writes the `.Rdata` bundle every Python script consumes; with `cmip_1pctCO2`, builds the separate 1pctCO2 bundle from `/uda` |
 | [find_cmip_1pct_models.sh](find_cmip_1pct_models.sh) | Read-only discovery of the 1pctCO2 / piControl runs on `/uda/cmip{3,5,6}` (names, layouts, run lengths) |
+| [plot_1pctCO2_nettoa_vs_T.py](plot_1pctCO2_nettoa_vs_T.py) | Net TOA vs T2M per 1pctCO2 run (first 100 yr, 10-yr rolling mean) with $\kappa = N/T$ beneath; writes `figures/1pctCO2/` |
 | [data/](data/) | `int_netToa_longrun.Rdata` — the preprocessed per-model time series; `li2012_fig1_N_vs_T.csv` — the digitized ECHAM5/MPIOM `N` and `T` the MT2 script's fifth model reads |
 | [extract_li2012_fig1.py](extract_li2012_fig1.py) | Digitizes Li et al. (2012) Fig. 1 out of the article PDF (needs `pymupdf`); writes the `li2012_fig1_*.csv` the MT2 script consumes |
 | [longrun_data_param_fit_script_2013a_allModels.py](longrun_data_param_fit_script_2013a_allModels.py) | Geoffroy 2013a two-box fit |

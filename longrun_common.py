@@ -15,6 +15,10 @@ RDATA_FILE = Path("./data/int_netToa_longrun.Rdata")
 # The 8 LongRunMIP models with usable piControl and abrupt-4xCO2 series.
 MODELS = ['CCSM3', 'CESM1', 'CNRMCM6', 'ECHAM5', 'GISSE2R', 'IPSLCM5A', 'HadGEM2', 'MPIESM11']
 
+EARTH_AREA = 5.1e14                    # m^2
+SECONDS_PER_YEAR = 31536000
+OCEAN_HEAT_CAPACITY = 1.37e21 * 3850   # full ocean [J K^-1]
+
 
 # ---- data ----
 
@@ -44,6 +48,34 @@ def finite_pair_mask(*arrays):
    for arr in arrays:
       mask &= np.isfinite(arr)
    return mask
+
+
+def perturbed_anomalies(model, model_data, expts, nettoa_scale=1.0, n_years=None,
+                        drop_nan_nettoa=True):
+   """(T2M, NETTOA) of the perturbed run minus the piControl means.
+
+   n_years truncates both experiments first. With drop_nan_nettoa False only
+   years with NaN T2M are dropped, and only from T2M.
+   """
+   means = {}
+   for expt in expts:
+      expt_data = model_data.rx2(expt)
+      t2m = np.array(expt_data.rx2("T2M")).ravel()[:n_years]
+      nettoa = np.array(expt_data.rx2("NETTOA")).ravel()[:n_years] * nettoa_scale
+      good = np.isfinite(t2m) & np.isfinite(nettoa) if drop_nan_nettoa else np.isfinite(t2m)
+      report_missing_years(model, expt, good)
+      t2m = t2m[good]
+      if drop_nan_nettoa:
+         nettoa = nettoa[good]
+      if expt == "piControl":
+         means = {"t2m": np.mean(t2m), "nettoa": np.mean(nettoa)}
+      elif expt == "4xCO2":
+         return t2m - means["t2m"], nettoa - means["nettoa"]
+
+
+def report_missing_years(model, expt, good):
+   if np.sum(good) / len(good) != 1:
+      print(f"{model} {expt} valid/all years:", np.sum(good) / len(good))
 
 
 # ---- --test model subset ----

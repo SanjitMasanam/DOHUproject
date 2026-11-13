@@ -26,8 +26,8 @@ import diffusive_common as dc
 from diffusive_common import EXPT, PDE_FIT_DZ_TARGET, RHO_CP, Case
 from figure_paths import BUDGET, RunLayout, figname
 from longrun_common import (
-   MODELS, add_test_argument, announce_test_mode, load_longrun_data, select_models,
-   sympy_prop_unc,
+   EARTH_AREA, MODELS, OCEAN_HEAT_CAPACITY, SECONDS_PER_YEAR, add_test_argument,
+   announce_test_mode, load_longrun_data, perturbed_anomalies, select_models, sympy_prop_unc,
 )
 from plot_style import format_ax
 
@@ -197,9 +197,10 @@ def fit_and_plot_model(figs, i, df, layout, run_type, model, reg, t2m, nettoa):
    # Normalized OHC vs T/T_eq. The model's reference heat content is that of
    # the column it was solved on.
    z_max, _ = dc.pde_grid(PDE_FIT_DZ_TARGET, kappa_pde, t_final_years)
-   ohc = (dc.EARTH_AREA * dc.SECONDS_PER_YEAR * np.cumsum(nettoa)) / dc.OCEAN_HEAT_CAPACITY
+   to_joules = EARTH_AREA * SECONDS_PER_YEAR          # annual W/m^2 -> J
+   ohc = (to_joules * np.cumsum(nettoa)) / OCEAN_HEAT_CAPACITY
    N_pde = F_ref - lmbda * (T_eq * pde_T) - (eps - 1.0) * H_plot
-   ohc_pred = (dc.EARTH_AREA * dc.SECONDS_PER_YEAR * np.cumsum(N_pde)) / (dc.EARTH_AREA * RHO_CP * z_max)
+   ohc_pred = (to_joules * np.cumsum(N_pde)) / (EARTH_AREA * RHO_CP * z_max)
    dc.plot_ohc_panel(figs, i, model, t2m/T_eq, ohc/T_eq, pde_T, ohc_pred/T_eq)
 
    dc.plot_sensitivity_panels(figs, i, model, case, kappa_pde, h_ml_pde, lmbda,
@@ -236,13 +237,13 @@ def main():
 
       reg = {}
       for i, model in enumerate(fit_models):
-         t2m, nettoa = dc.perturbed_anomalies(model, data.rx2(model), expts,
+         t2m, nettoa = perturbed_anomalies(model, data.rx2(model), expts,
                                               n_years=150 if run_type == 1 else None)
          reg[model] = fit_gregory(figs.step1.axs[i], df, model, t2m, nettoa, run_type)
       print("Finished Step 1: Gregory params to df (Step 1 figures saved after Step 2)")
 
       for i, model in enumerate(fit_models):
-         t2m, nettoa = dc.perturbed_anomalies(model, data.rx2(model), expts,
+         t2m, nettoa = perturbed_anomalies(model, data.rx2(model), expts,
                                               drop_nan_nettoa=False)
          fit_and_plot_model(figs, i, df, layout, run_type, model, reg[model], t2m, nettoa)
          progress.step(run_type, model)
