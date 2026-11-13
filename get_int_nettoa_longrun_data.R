@@ -7,6 +7,8 @@
 #        --resolve-only   only find and check the input files (no reading: needs neither ncdf4 nor NCO)
 #        --models A,B     only these labels (see cmip_runs below)
 #        --redo           recompute the selected models even if they have a checkpoint
+#        --bundle-only    only rebuild the bundle from the valid checkpoints (all, or --models);
+#                         reads nothing from /uda and needs neither ncdf4 nor NCO
 #
 # Each model that finishes is checkpointed to cmip_ckpt_dir, so a rerun after an interruption
 # (or a failure) only does the models still missing. A checkpoint is reused only while that
@@ -25,12 +27,14 @@ args         = commandArgs(trailingOnly = TRUE)
 dataset      = if (length(args) > 0 && !startsWith(args[1], "--")) args[1] else "longrunmip"
 resolve_only = "--resolve-only" %in% args
 redo         = "--redo" %in% args
+bundle_only  = "--bundle-only" %in% args
 i_models     = match("--models", args)
 model_subset = if (is.na(i_models)) NULL else strsplit(args[i_models + 1], ",")[[1]]
 if (!dataset %in% c("longrunmip", "cmip_1pctCO2"))
    stop("unknown dataset '", dataset, "': use longrunmip (default) or cmip_1pctCO2")
 if (!is.null(model_subset) && anyNA(model_subset)) stop("--models needs a value, e.g. --models CESM1,CM3")
-if (!(dataset == "cmip_1pctCO2" && resolve_only)) library(ncdf4)
+if (bundle_only && (resolve_only || redo)) stop("--bundle-only cannot be combined with --resolve-only or --redo")
+if (!(dataset == "cmip_1pctCO2" && (resolve_only || bundle_only))) library(ncdf4)
 
 # =================================================================================================
 # CMIP 1pctCO2 + piControl (dataset = "cmip_1pctCO2")
@@ -487,19 +491,19 @@ ckpt_key  = function(run) list(run = run[c("label", "era", "center", "model", "m
                                min_years = min_years, spatial_mean = spatial_mean, vars = cmip_vars)
 
 # The checkpointed data of a model, or NULL (with the reason printed) if there is none usable.
-ckpt_load = function(run, quiet = FALSE){
+ckpt_load = function(run, quiet = FALSE, if_bad = "recomputing"){
    f = ckpt_path(run$label)
    if (!file.exists(f)) return(NULL)
    ck = tryCatch(readRDS(f), error = function(e) NULL)
    if (is.null(ck) || !identical(ck$key, ckpt_key(run))){
-      if (!quiet) cat("  checkpoint", f, "is unreadable or from a different config; recomputing\n")
+      if (!quiet) cat("  checkpoint", f, "is unreadable or from a different config;", if_bad, "\n")
       return(NULL)
    }
    # A checkpoint holding more years than max_years is cut; one holding fewer is recomputed.
    # (Checkpoints from before max_years existed hold every year.)
    saved_max = if (is.null(ck$max_years)) Inf else ck$max_years
    if (saved_max < max_years){
-      if (!quiet) cat("  checkpoint", f, "holds at most", saved_max, "yr, less than max_years; recomputing\n")
+      if (!quiet) cat("  checkpoint", f, "holds at most", saved_max, "yr, less than max_years;", if_bad, "\n")
       return(NULL)
    }
    trim_years(ck$data, run$label)
@@ -519,6 +523,18 @@ print_run_summary = function(d)
                d[["1pctCO2"]]$experiment, d[["1pctCO2"]]$member, length(d[["1pctCO2"]]$T2M),
                mean(d[["1pctCO2"]]$NETTOA[1:5])))
 
+# Write the bundle from a list of per-model data, in cmip_runs order.
+save_bundle = function(cmip_data){
+   cmip_data = cmip_data[intersect(cmip_runs$label, names(cmip_data))]
+   if (!length(cmip_data)){ cat("Nothing to save.\n"); return(invisible(FALSE)) }
+   models = names(cmip_data); Nmodels = length(models)
+   expts  = c("piControl", "1pctCO2"); vars = c("T2M", "NETTOA")
+   int_nettoa_1pctCO2_data = cmip_data
+   save(models, Nmodels, expts, vars, int_nettoa_1pctCO2_data, file = cmip_out)
+   cat("Saved", Nmodels, "model(s) to", cmip_out, ":", paste(models, collapse = ", "), "\n")
+   invisible(TRUE)
+}
+
 # ---- Main ----------------------------------------------------------------------------------------
 if (dataset == "cmip_1pctCO2"){
    if (max_years < min_years) stop("max_years (", max_years, ") is less than min_years (", min_years, ")")
@@ -529,6 +545,27 @@ if (dataset == "cmip_1pctCO2"){
                             " (labels: ", paste(runs$label, collapse = ", "), ")")
       runs = runs[runs$label %in% model_subset, , drop = FALSE]
    }
+
+   # --bundle-only: write the bundle from the checkpoints alone; nothing is read from /uda.
+   if (bundle_only){
+      if (!dir.exists(dirname(cmip_out))) stop("no ", dirname(cmip_out), " directory: run from the repo root")
+      cat("--bundle-only: rebuilding", cmip_out, "from", cmip_ckpt_dir, "\n")
+      cmip_data = list()
+      for (k in seq_len(nrow(runs))){
+         run = as.list(runs[k, ])
+         if (!file.exists(ckpt_path(run$label))){ cat(sprintf("  %-9s no checkpoint\n", run$label)); next }
+         cat(sprintf("  %-9s\n", run$label))
+         d = ckpt_load(run, if_bad = "left out")
+         if (is.null(d)) next
+         print_run_summary(d)
+         cmip_data[[run$label]] = d
+      }
+      strays = setdiff(sub("\\.rds$", "", list.files(cmip_ckpt_dir, pattern = "\\.rds$")), cmip_runs$label)
+      if (length(strays)) cat("  ignored (label not in cmip_runs):", paste(strays, collapse = ", "), "\n")
+      save_bundle(cmip_data)
+      quit(save = "no", status = 0)
+   }
+
    if (!resolve_only){
       if (spatial_mean == "nco" && Sys.which("ncap2") == "")
          stop("ncap2 not found: run `module load nco` first, or set spatial_mean = \"r\"")
@@ -581,14 +618,7 @@ if (dataset == "cmip_1pctCO2"){
          if (!is.null(d)){ cmip_data[[lab]] = d; extra = c(extra, lab) }
       }
       if (length(extra)) cat("  also in the bundle, from checkpoints:", paste(extra, collapse = ", "), "\n")
-      cmip_data = cmip_data[intersect(cmip_runs$label, names(cmip_data))]   # table order
-      if (length(cmip_data)){
-         models = names(cmip_data); Nmodels = length(models)
-         expts  = c("piControl", "1pctCO2"); vars = c("T2M", "NETTOA")
-         int_nettoa_1pctCO2_data = cmip_data
-         save(models, Nmodels, expts, vars, int_nettoa_1pctCO2_data, file = cmip_out)
-         cat("Saved", Nmodels, "model(s) to", cmip_out, "\n")
-      } else cat("Nothing to save.\n")
+      save_bundle(cmip_data)
    }
    if (length(failures)) cat(length(failures), "model(s) failed; the full messages are above.\n")
    quit(save = "no", status = if (length(failures)) 1 else 0)
