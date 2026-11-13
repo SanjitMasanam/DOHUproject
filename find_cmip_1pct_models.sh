@@ -73,16 +73,23 @@ for root in "${roots[@]}"; do
    fi
 
    # ---- Stage A: model directories, shallowest level that has any --------------------------
+   # A level whose matches are all unwanted (e.g. the center dir EC-Earth-Consortium matching
+   # "ec-earth") does not stop the search: keep going until a wanted model name turns up.
    : > "$tmpd/hits"
    found=0
    d=1
    while [ "$d" -le "$maxdepth" ]; do
       find "$follow" "$root" -mindepth "$d" -maxdepth "$d" -type d "${name_args[@]}" 2>>"$tmpd/errors" | sort > "$tmpd/hits"
-      if [ -s "$tmpd/hits" ]; then found=$d; break; fi
+      if [ -s "$tmpd/hits" ]; then
+         if [ "$wanted" = all ] || awk -F/ -v w=" $wanted " 'index(w, " " $NF " ") { f = 1 } END { exit !f }' "$tmpd/hits"; then
+            found=$d; break
+         fi
+         echo "  depth $d: matches but none in MODELS ($(awk -F/ '{ print $NF }' "$tmpd/hits" | sort -u | head -5 | tr '\n' ' ')...); going deeper"
+      fi
       d=$((d + 1))
    done
    if [ "$found" -eq 0 ]; then
-      echo "!! no directory matching the model patterns within $maxdepth levels (try MAXDEPTH=10 or PATTERNS=...)"
+      echo "!! no wanted model directory within $maxdepth levels (try MAXDEPTH=10, MODELS=all or PATTERNS=...)"
       continue
    fi
    echo "Stage A: $(wc -l < "$tmpd/hits" | tr -d ' ') model directories at depth $found."

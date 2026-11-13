@@ -40,18 +40,21 @@ cmip_out     = "./data/int_netToa_1pctCO2.Rdata"
 # Mapping caveats (check against find_cmip_1pct_models.sh):
 #   CESM1    LongRunMIP's CESM1.0.4 has CAM4 physics, closest to CMIP5 CCSM4 (alternative: CESM1-CAM5)
 #   MPIESM11 MPI-ESM1.1 sits between CMIP5 MPI-ESM-LR (1.0) and CMIP6 MPI-ESM1-2-LR
-#   MIROC3   cmip3 has both miroc3_2_medres and miroc3_2_hires
-#   HadGEM2  HadGEM2-ES assumed (cmip5 also has HadGEM2-CC)
+#   MIROC3   cmip3 miroc3_2_medres has only tas on /uda (no rsdt/rsut/rlut), so it fails;
+#            miroc3_2_hires is the other candidate. MIROC3 is not in the fit set anyway.
+#   ECEARTH  cmip5 ICHEC EC-EARTH has a piControl (tas only) but no 1pctCO2, so it fails; not in
+#            the fit set either.
+#   HadGEM2  HadGEM2-ES from MOHC (INPE has a HadGEM2-ES dir too, with no 1pctCO2/piControl)
 cmip_runs = read.table(header = TRUE, colClasses = "character", text = "
 label     era    center        model            member  pi_member
-CCSM3     cmip3  -             ncar_ccsm3_0     -       -
+CCSM3     cmip3  NCAR          ncar_ccsm3_0     -       -
 CESM1     cmip5  NCAR          CCSM4            -       -
 CNRMCM6   cmip6  CNRM-CERFACS  CNRM-CM6-1       -       -
 ECEARTH   cmip5  ICHEC         EC-EARTH         -       -
-ECHAM5    cmip3  -             mpi_echam5       -       -
+ECHAM5    cmip3  MPI-M         mpi_echam5       -       -
 GISSE2R   cmip5  NASA-GISS     GISS-E2-R        -       -
 IPSLCM5A  cmip5  IPSL          IPSL-CM5A-LR     -       -
-MIROC3    cmip3  -             miroc3_2_medres  -       -
+MIROC3    cmip3  MIROC         miroc3_2_medres  -       -
 HadGEM2   cmip5  MOHC          HadGEM2-ES       -       -
 MPIESM11  cmip5  MPI-M         MPI-ESM-LR       -       -
 CM3       cmip5  NOAA-GFDL     GFDL-CM3         -       -
@@ -60,33 +63,34 @@ ESM2G     cmip5  NOAA-GFDL     GFDL-ESM2G       -       -
 ")
 member_pref = c("r1i1p1f1", "r1i1p1", "run1")
 
-# Experiment names per archive; alternatives are tried in order (cmip3 has no plain 1pctCO2).
+# Experiment directory names per archive; alternatives are tried in order. /uda/cmip3 uses the
+# CMIP5-style names (1pctCO2, piControl), with 1pctto2x as a separate experiment we don't use.
 cmip_expts = list(
-   cmip3 = list(piControl = "picntrl",   "1pctCO2" = c("1pctto4x", "1pctto2x")),
+   cmip3 = list(piControl = "piControl", "1pctCO2" = c("1pctCO2", "1pctto4x")),
    cmip5 = list(piControl = "piControl", "1pctCO2" = "1pctCO2"),
    cmip6 = list(piControl = "piControl", "1pctCO2" = "1pctCO2"))
 # Forcing of the perturbed run, read the same way as the LongRunMIP bundle's co2_multiple /
-# ramp_years. 1pctCO2 ramps for the whole run (NA); the cmip3 runs hold CO2 once it is reached.
+# ramp_years, looked up as "<era>/<experiment>" and then "<experiment>". CMIP5/6 1pctCO2 ramps for
+# the whole run (NA). The cmip3 "1pctCO2" is ASSUMED to be CMIP3's 1pctto4x (ramp to 4x over
+# 139.3 yr, then hold), since 1pctto2x sits next to it: the experiment attribute of the files,
+# printed while reading, confirms or refutes this.
 expt_forcing = list(
-   "1pctCO2"  = list(co2_multiple = NA, ramp_years = NA),
-   "1pctto4x" = list(co2_multiple = 4,  ramp_years = log(4)/log(1.01)),
-   "1pctto2x" = list(co2_multiple = 2,  ramp_years = log(2)/log(1.01)))
+   "1pctCO2"       = list(co2_multiple = NA, ramp_years = NA),
+   "cmip3/1pctCO2" = list(co2_multiple = 4,  ramp_years = log(4)/log(1.01)),
+   "1pctto4x"      = list(co2_multiple = 4,  ramp_years = log(4)/log(1.01)))
 
 # Path templates per archive, tried in order; the first with any match is used. Placeholders:
 # {root} {center} {model} {expt} {member} {var} {grid} {version}; member/grid/version are
-# wildcards unless fixed, and * matches within one path level. Only cmip6 follows the layout
-# given for /uda; cmip5 and cmip3 are the usual ESGF/PCMDI layouts:
-# VERIFY them against the sample paths printed by find_cmip_1pct_models.sh.
+# wildcards unless fixed, and * matches within one path level. cmip3 and cmip5 follow the
+# sample paths find_cmip_1pct_models.sh printed for /uda; cmip6 is still unconfirmed.
 path_templates = list(
    cmip6 = c(
-      "{root}/CMIP/{center}/{model}/{member}/Amon/{var}/{grid}/{version}/{var}_Amon_{model}_{expt}_{member}_{grid}_*.nc",
-      "{root}/CMIP/{center}/{model}/{expt}/{member}/Amon/{var}/{grid}/{version}/{var}_Amon_{model}_{expt}_{member}_{grid}_*.nc"),
-   cmip5 = c(
-      "{root}/output1/{center}/{model}/{expt}/mon/atmos/Amon/{member}/{version}/{var}/{var}_Amon_{model}_{expt}_{member}_*.nc",
-      "{root}/output1/{center}/{model}/{expt}/mon/atmos/Amon/{member}/{var}/{var}_Amon_{model}_{expt}_{member}_*.nc",
-      "{root}/output1/{center}/{model}/{expt}/mon/atmos/{var}/{member}/{var}_Amon_{model}_{expt}_{member}_*.nc"),
-   cmip3 = c(
-      "{root}/{expt}/atm/mo/{var}/{model}/{member}/{var}_A1*.nc"))
+      "{root}/CMIP/{center}/{model}/{expt}/{member}/Amon/{var}/{grid}/{version}/{var}_Amon_{model}_{expt}_{member}_{grid}_*.nc",
+      "{root}/CMIP/{center}/{model}/{member}/Amon/{var}/{grid}/{version}/{var}_Amon_{model}_{expt}_{member}_{grid}_*.nc"),
+   cmip5 = c(   # /uda/cmip5/ICHEC/EC-EARTH/piControl/mon/atmos/Amon/r1i1p1/v20120622/tas/tas_Amon_EC-EARTH_piControl_r1i1p1_253001-253912.nc
+      "{root}/{center}/{model}/{expt}/mon/atmos/Amon/{member}/{version}/{var}/{var}_Amon_{model}_{expt}_{member}_*.nc"),
+   cmip3 = c(   # /uda/cmip3/MIROC/miroc3_2_medres/1pctCO2/mon/atmos/run3/tas/v1/tas_A1.nc
+      "{root}/{center}/{model}/{expt}/mon/atmos/{member}/{var}/{version}/{var}_A1*.nc"))
 
 # ---- Helpers -------------------------------------------------------------------------------------
 cmip_fail = function(ctx, ...) stop(paste0("[", ctx, "] ", ...), call. = FALSE)
@@ -320,7 +324,10 @@ read_global_mean = function(path, var, ctx){
    gm   = if (spatial_mean == "nco") nco_global_mean(path, var, dn[ilat], dn[ilon], ctx)
           else r_global_mean(nc, var, v$dim[[ilat]]$vals, ilat, ilon, itime)
    if (length(gm) != tdim$len) cmip_fail(ctx, "global mean has ", length(gm), " steps, time axis ", tdim$len, " in ", path)
-   list(x = gm, time = tdim$vals, units = tdim$units, calendar = cal, w = w)
+   ea = ncatt_get(nc, 0, "experiment")                # long description (cmip3/5), e.g. "1%/year CO2 increase"
+   if (!ea$hasatt) ea = ncatt_get(nc, 0, "experiment_id")
+   list(x = gm, time = tdim$vals, units = tdim$units, calendar = cal, w = w,
+        expt_attr = if (ea$hasatt) as.character(ea$value) else NA_character_)
 }
 
 # Monthly pieces (files in order) -> annual means from the first January, weighted by month length.
@@ -361,7 +368,12 @@ process_run = function(run, res){
       for (v in cmip_vars){
          ctx = paste(run$label, r$experiment, v)
          cat(sprintf("  reading %-9s %-5s (%d file(s))\n", r$experiment, v, length(r[[v]]$files)))
-         ann[[v]] = annualise(lapply(r[[v]]$files, read_global_mean, var = v, ctx = ctx), ctx)
+         pieces   = lapply(r[[v]]$files, read_global_mean, var = v, ctx = ctx)
+         ann[[v]] = annualise(pieces, ctx)
+         if (v == "tas"){
+            expt_attr = pieces[[1]]$expt_attr
+            cat("    experiment attribute:", expt_attr, "\n")
+         }
       }
       # Align the variables on common years (by calendar year when known, else from the start).
       starts = vapply(ann, `[[`, 0, "start")
@@ -375,10 +387,13 @@ process_run = function(run, res){
       n   = y1 - y0 + 1
       if (n < min_years) cmip_fail(paste(run$label, r$experiment), sprintf("only %d full years after reading; need %d", n, min_years))
       out[[ex]] = list(T2M = ann$tas, NETTOA = ann$rsdt - ann$rsut - ann$rlut,
-                       years = if (y0 == 0) NA else y0:y1, experiment = r$experiment, member = r$tas$member,
+                       years = if (y0 == 0) NA else y0:y1, experiment = r$experiment, expt_attr = expt_attr,
+                       member = r$tas$member,
                        file = unlist(lapply(cmip_vars, function(v) r[[v]]$files)))
    }
-   f = expt_forcing[[res[["1pctCO2"]]$experiment]]
+   pe = res[["1pctCO2"]]$experiment
+   f  = expt_forcing[[paste(run$era, pe, sep = "/")]]
+   if (is.null(f)) f = expt_forcing[[pe]]
    if (is.null(f)) f = list(co2_multiple = NA, ramp_years = NA)
    c(out, list(source_model = run$model, center = run$center, era = run$era,
                co2_multiple = f$co2_multiple, ramp_years = f$ramp_years, co2_pct_per_yr = 1))
