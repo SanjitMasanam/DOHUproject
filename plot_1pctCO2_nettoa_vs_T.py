@@ -17,10 +17,17 @@ Anomalies are taken against the piControl time mean, as perturbed_anomalies does
 for the 4xCO2 plots. Every run is cut at N_YEARS = 100, which also keeps the
 CMIP3 1pctto4x runs on their ramp (CO2 reaches 4x at yr ~139).
 
+The input can be the full bundle or the per-model checkpoints the R script writes
+as it goes (data/cmip_1pctCO2_checkpoints/<label>.rds), so a partial run can be
+plotted before every model has finished. Without --data, the bundle is used if it
+exists, else the checkpoint directory.
+
 Usage (from the repo root):
     python3 plot_1pctCO2_nettoa_vs_T.py
     python3 plot_1pctCO2_nettoa_vs_T.py --test CM3,CESM1
-    python3 plot_1pctCO2_nettoa_vs_T.py --rdata /path/to/int_netToa_1pctCO2.Rdata
+    python3 plot_1pctCO2_nettoa_vs_T.py --data /path/to/int_netToa_1pctCO2.Rdata
+    python3 plot_1pctCO2_nettoa_vs_T.py --data data/cmip_1pctCO2_checkpoints       # every checkpoint
+    python3 plot_1pctCO2_nettoa_vs_T.py --data data/cmip_1pctCO2_checkpoints/CM3.rds
 
 Output: figures/1pctCO2/1pctCO2_all_models_T2M_vs_NETTOA_kappa.png
 """
@@ -38,6 +45,11 @@ from plot_style import EXTRA_TEXT_FONTSIZE, format_ax, make_model_grid_with_rati
 
 # Relative on purpose: run from the repo root, like the longrun scripts.
 RDATA_FILE = Path("./data/int_netToa_1pctCO2.Rdata")
+CKPT_DIR = Path("./data/cmip_1pctCO2_checkpoints")
+
+# Panel order for checkpoints (the bundle has its own): cmip_runs in get_int_nettoa_longrun_data.R.
+MODEL_ORDER = ["CCSM3", "CESM1", "CNRMCM6", "ECEARTH", "ECHAM5", "GISSE2R", "IPSLCM5A",
+               "MIROC3", "HadGEM2", "MPIESM11", "CM3", "ESM2M", "ESM2G"]
 
 EXPT = "1pctCO2"
 N_YEARS = 100            # every run is cut here
@@ -52,37 +64,56 @@ KAPPA_LABEL = r"$\kappa = N/T$ ($W\,m^{-2}K^{-1}$)"
 
 # ---- data ----
 
-def load_1pct_data(rdata_file):
-   """{model: {"piControl"/"1pctCO2": {"T2M", "NETTOA"}, "experiment": str}}, in bundle order."""
-   if not Path(rdata_file).exists():
-      raise SystemExit(f"{rdata_file} not found. Build it on the GFDL analysis machine with\n"
+def model_entry(md):
+   """One model's R list (a bundle entry or a checkpoint's $data) as plain arrays."""
+   d = {ex: {v: as_1d_float(md.rx2(ex).rx2(v)) for v in ("T2M", "NETTOA")}
+        for ex in ("piControl", EXPT)}
+   try:
+      d["experiment"] = str(md.rx2(EXPT).rx2("experiment")[0])
+   except Exception:
+      d["experiment"] = EXPT
+   return d
+
+
+def load_1pct_data(path=None):
+   """{model: {"piControl"/"1pctCO2": {"T2M", "NETTOA"}, "experiment": str}}.
+
+   `path` is the .Rdata bundle, one checkpoint .rds, or a directory of them; None picks
+   the bundle if it exists, else the checkpoint directory.
+   """
+   if path is None:
+      path = RDATA_FILE if RDATA_FILE.exists() else CKPT_DIR
+   path = Path(path)
+   if not path.exists():
+      raise SystemExit(f"{path} not found. Build the data on the GFDL analysis machine with\n"
                        f"   Rscript get_int_nettoa_longrun_data.R cmip_1pctCO2\n"
-                       f"and copy it here, or point --rdata at it.")
+                       f"and copy {RDATA_FILE} or {CKPT_DIR}/ here, or point --data at it.")
    import rpy2.robjects as ro  # deferred: needs a system R
 
-   ro.r["load"](str(rdata_file))
+   if path.is_dir() or path.suffix.lower() == ".rds":
+      files = sorted(path.glob("*.rds")) if path.is_dir() else [path]
+      if not files:
+         raise SystemExit(f"No checkpoint (.rds) files in {path}.")
+      rank = {m: i for i, m in enumerate(MODEL_ORDER)}
+      files.sort(key=lambda f: (rank.get(f.stem, len(rank)), f.stem))
+      print(f"Reading {len(files)} checkpoint(s) from {path}")
+      return {f.stem: model_entry(ro.r["readRDS"](str(f)).rx2("data")) for f in files}
+
+   print(f"Reading bundle {path}")
+   ro.r["load"](str(path))
    bundle = ro.globalenv["int_nettoa_1pctCO2_data"]
-   out = {}
-   for model in bundle.names:
-      md = bundle.rx2(model)
-      d = {ex: {v: as_1d_float(md.rx2(ex).rx2(v)) for v in ("T2M", "NETTOA")}
-           for ex in ("piControl", EXPT)}
-      try:
-         d["experiment"] = str(md.rx2(EXPT).rx2("experiment")[0])
-      except Exception:
-         d["experiment"] = EXPT
-      out[str(model)] = d
-   return out
+   return {str(m): model_entry(bundle.rx2(m)) for m in bundle.names}
 
 
 def anomalies(model, d, n_years=N_YEARS):
-   """(T, N) of the first n_years of 1pctCO2 minus the piControl means, finite years only,
-   with the matching simulation years (1-based)."""
-   pi = d["piControl"]
-   pi_ok = np.isfinite(pi["T2M"]) & np.isfinite(pi["NETTOA"])
+   """(T, N) of the first n_years of 1pctCO2 minus the means of the first n_years of
+   piControl, finite years only, with the matching simulation years (1-based). The bundle
+   already holds n_years; checkpoints saved before max_years existed may hold more."""
+   pi_T, pi_N = d["piControl"]["T2M"][:n_years], d["piControl"]["NETTOA"][:n_years]
+   pi_ok = np.isfinite(pi_T) & np.isfinite(pi_N)
    with np.errstate(invalid="ignore"):   # R's NA is a NaN payload numpy warns on; masked below
-      T = d[EXPT]["T2M"][:n_years] - np.mean(pi["T2M"][pi_ok])
-      N = d[EXPT]["NETTOA"][:n_years] - np.mean(pi["NETTOA"][pi_ok])
+      T = d[EXPT]["T2M"][:n_years] - np.mean(pi_T[pi_ok])
+      N = d[EXPT]["NETTOA"][:n_years] - np.mean(pi_N[pi_ok])
    years = np.arange(1, T.shape[0] + 1)
    ok = np.isfinite(T) & np.isfinite(N)
    if T.shape[0] < n_years:
@@ -136,17 +167,18 @@ def plot_model(ax, ratio_ax, model, d):
 def main():
    ap = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-   ap.add_argument("--rdata", type=Path, default=RDATA_FILE,
-                   help=f"1pctCO2 bundle (default {RDATA_FILE})")
+   ap.add_argument("--data", "--rdata", dest="data", type=Path, default=None,
+                   help=f"the .Rdata bundle, one checkpoint .rds, or a directory of checkpoints "
+                        f"(default: {RDATA_FILE} if it exists, else {CKPT_DIR})")
    add_test_argument(ap)
    args = ap.parse_args()
 
-   data = load_1pct_data(args.rdata)
+   data = load_1pct_data(args.data)
    all_models = list(data)
    models = select_models(all_models, args.test)
    announce_test_mode(models, all_models, args.test)
    if not models:
-      raise SystemExit(f"No models in {args.rdata}.")
+      raise SystemExit("No models in the input.")
 
    fig, axs, ratio_axs = make_model_grid_with_ratio(
       models, title=rf"1pctCO$_2$ Net TOA vs T$_{{2M}}$ (first {N_YEARS} yr)",
