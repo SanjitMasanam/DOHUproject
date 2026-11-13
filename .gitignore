@@ -23,3 +23,7 @@ rogers2023/
 
 # Local MCP server config (machine-specific absolute paths).
 .mcp.json
+
+# Per-model checkpoints of get_int_nettoa_longrun_data.R cmip_1pctCO2, and the discovery inventory.
+data/cmip_1pctCO2_checkpoints/
+cmip_1pct_inventory.tsv

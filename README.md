@@ -62,7 +62,9 @@ experiment and writes `data/int_netToa_1pctCO2.Rdata` (`int_nettoa_1pctCO2_data[
 `$"1pctCO2"`). The label → archive mapping (`cmip_runs`) and the per-archive path templates are at the
 top of the script. CMIP5/6 have no exact match for several LongRunMIP versions: CESM1 → CCSM4 and
 MPIESM11 → MPI-ESM-LR are the nearest stand-ins. If a model fails (no matching files, a gap between
-files, too short), the script says why, skips that model and exits non-zero. The fit scripts do not
+files, too short), the script says why, skips that model and exits non-zero. Each finished model
+is checkpointed to `data/cmip_1pctCO2_checkpoints/` (git-ignored), so rerunning after an
+interruption or a fix redoes only the missing models; `--redo` recomputes the selected ones. The fit scripts do not
 read this bundle yet.
 
 The Python scripts load that bundle through `rpy2` (`ro.r["load"](...)`, then

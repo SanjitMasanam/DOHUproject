@@ -6,6 +6,13 @@
 #                                                        -> ./data/int_netToa_1pctCO2.Rdata
 #        --resolve-only   only find and check the input files (no reading: needs neither ncdf4 nor NCO)
 #        --models A,B     only these labels (see cmip_runs below)
+#        --redo           recompute the selected models even if they have a checkpoint
+#
+# Each model that finishes is checkpointed to cmip_ckpt_dir, so a rerun after an interruption
+# (or a failure) only does the models still missing. A checkpoint is reused only while that
+# model's row in cmip_runs, min_years and spatial_mean are unchanged; delete it or use --redo
+# otherwise. The bundle always holds every model with a valid checkpoint, also when --models
+# selects only a few.
 #
 # For cmip_1pctCO2, run ./find_cmip_1pct_models.sh first: it prints the real center/model names
 # and a sample path per archive, which is what cmip_runs and path_templates below must match.
@@ -13,6 +20,7 @@
 args         = commandArgs(trailingOnly = TRUE)
 dataset      = if (length(args) > 0 && !startsWith(args[1], "--")) args[1] else "longrunmip"
 resolve_only = "--resolve-only" %in% args
+redo         = "--redo" %in% args
 i_models     = match("--models", args)
 model_subset = if (is.na(i_models)) NULL else strsplit(args[i_models + 1], ",")[[1]]
 if (!dataset %in% c("longrunmip", "cmip_1pctCO2"))
@@ -34,6 +42,7 @@ min_years    = 100                                # both experiments must have a
 spatial_mean = "nco"   # "nco": ncap2 does the area mean (needs `module load nco`); "r": ncdf4 in R
 cmip_vars    = c("tas", "rsdt", "rsut", "rlut")
 cmip_out     = "./data/int_netToa_1pctCO2.Rdata"
+cmip_ckpt_dir = "./data/cmip_1pctCO2_checkpoints"  # one <label>.rds per finished model (git-ignored)
 
 # label = key in the Rdata (the LongRunMIP names). member "-" = choose automatically (member_pref,
 # then first in sort order); pi_member "-" = the same member as the 1pctCO2 run.
@@ -449,6 +458,37 @@ process_run = function(run, res){
                co2_multiple = f$co2_multiple, ramp_years = f$ramp_years, co2_pct_per_yr = 1))
 }
 
+# ---- Checkpoints: one finished model per file ----------------------------------------------------
+ckpt_path = function(label) file.path(cmip_ckpt_dir, paste0(label, ".rds"))
+ckpt_key  = function(run) list(run = run[c("label", "era", "center", "model", "member", "pi_member")],
+                               min_years = min_years, spatial_mean = spatial_mean, vars = cmip_vars)
+
+# The checkpointed data of a model, or NULL (with the reason printed) if there is none usable.
+ckpt_load = function(run, quiet = FALSE){
+   f = ckpt_path(run$label)
+   if (!file.exists(f)) return(NULL)
+   ck = tryCatch(readRDS(f), error = function(e) NULL)
+   if (is.null(ck) || !identical(ck$key, ckpt_key(run))){
+      if (!quiet) cat("  checkpoint", f, "is unreadable or from a different config; recomputing\n")
+      return(NULL)
+   }
+   ck$data
+}
+
+# Written to a temporary name and renamed, so an interruption never leaves a half-written file.
+ckpt_save = function(run, d){
+   dir.create(cmip_ckpt_dir, showWarnings = FALSE, recursive = TRUE)
+   tmp = paste0(ckpt_path(run$label), ".tmp")
+   saveRDS(list(key = ckpt_key(run), data = d, saved = format(Sys.time())), tmp)
+   file.rename(tmp, ckpt_path(run$label))
+}
+
+print_run_summary = function(d)
+   cat(sprintf("  piControl %d yr: mean T2M %.2f, NETTOA %.2f W/m2 | %s (%s) %d yr: NETTOA yrs 1-5 %.2f W/m2\n",
+               length(d$piControl$T2M), mean(d$piControl$T2M), mean(d$piControl$NETTOA),
+               d[["1pctCO2"]]$experiment, d[["1pctCO2"]]$member, length(d[["1pctCO2"]]$T2M),
+               mean(d[["1pctCO2"]]$NETTOA[1:5])))
+
 # ---- Main ----------------------------------------------------------------------------------------
 if (dataset == "cmip_1pctCO2"){
    runs = cmip_runs
@@ -468,9 +508,20 @@ if (dataset == "cmip_1pctCO2"){
 
    cmip_data = list()
    failures  = character(0)
+   from_ckpt = character(0)
    for (k in seq_len(nrow(runs))){
       run = as.list(runs[k, ])
       cat(sprintf("\n=== %s: %s %s %s\n", run$label, run$era, run$center, run$model))
+      if (!resolve_only && !redo){
+         d = ckpt_load(run)
+         if (!is.null(d)){
+            cat("  done in an earlier run: loaded", ckpt_path(run$label), "(--redo to recompute)\n")
+            print_run_summary(d)
+            cmip_data[[run$label]] = d
+            from_ckpt = c(from_ckpt, run$label)
+            next
+         }
+      }
       d = tryCatch({
          res = resolve_run(run)
          if (resolve_only) res else process_run(run, res)
@@ -481,17 +532,25 @@ if (dataset == "cmip_1pctCO2"){
       })
       if (is.null(d) || resolve_only) next
       cmip_data[[run$label]] = d
-      cat(sprintf("  piControl %d yr: mean T2M %.2f, NETTOA %.2f W/m2 | %s (%s) %d yr: NETTOA yrs 1-5 %.2f W/m2\n",
-                  length(d$piControl$T2M), mean(d$piControl$T2M), mean(d$piControl$NETTOA),
-                  d[["1pctCO2"]]$experiment, d[["1pctCO2"]]$member, length(d[["1pctCO2"]]$T2M),
-                  mean(d[["1pctCO2"]]$NETTOA[1:5])))
+      ckpt_save(run, d)
+      print_run_summary(d)
    }
 
    cat("\n=== Summary", if (resolve_only) "(--resolve-only: nothing read or saved)", "\n")
    for (lab in runs$label)
       cat(sprintf("  %-7s %-9s %s\n", if (lab %in% names(failures)) "FAILED" else "OK", lab,
-                  if (lab %in% names(failures)) strsplit(failures[[lab]], "\n")[[1]][1] else ""))
+                  if (lab %in% names(failures)) strsplit(failures[[lab]], "\n")[[1]][1]
+                  else if (lab %in% from_ckpt) "(from checkpoint)" else ""))
    if (!resolve_only){
+      # Models left out by --models still go into the bundle if they have a valid checkpoint.
+      others = setdiff(cmip_runs$label, runs$label)
+      extra  = character(0)
+      for (lab in others){
+         d = ckpt_load(as.list(cmip_runs[cmip_runs$label == lab, ]), quiet = TRUE)
+         if (!is.null(d)){ cmip_data[[lab]] = d; extra = c(extra, lab) }
+      }
+      if (length(extra)) cat("  also in the bundle, from checkpoints:", paste(extra, collapse = ", "), "\n")
+      cmip_data = cmip_data[intersect(cmip_runs$label, names(cmip_data))]   # table order
       if (length(cmip_data)){
          models = names(cmip_data); Nmodels = length(models)
          expts  = c("piControl", "1pctCO2"); vars = c("T2M", "NETTOA")
