@@ -46,8 +46,8 @@ if (!(dataset == "cmip_1pctCO2" && (resolve_only || bundle_only))) library(ncdf4
 # ---- Config: the part expected to need hand edits ------------------------------------------------
 uda          = Sys.getenv("CMIP_UDA", "/uda")     # override to test against a copy of the tree
 cmip_root    = c(cmip3 = file.path(uda, "cmip3"), cmip5 = file.path(uda, "cmip5"), cmip6 = file.path(uda, "cmip6"))
-min_years    = 100                                # both experiments must have at least this many
-max_years    = 100   # ...and keep only their first max_years (Inf = all); files past it are not read
+min_years    = 140                                # both experiments must have at least this many
+max_years    = 150   # ...and keep only their first max_years (Inf = all); files past it are not read
 spatial_mean = "nco"   # "nco": ncap2 does the area mean (needs `module load nco`); "r": ncdf4 in R
 cmip_vars    = c("tas", "rsdt", "rsut", "rlut")
 cmip_out     = "./data/int_netToa_1pctCO2.Rdata"
