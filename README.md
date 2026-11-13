@@ -15,7 +15,8 @@ and plot styling with the others.
 
 | Path | Role |
 | --- | --- |
-| [get_int_nettoa_longrun_data.R](get_int_nettoa_longrun_data.R) | Reads LongRunMIP NetCDF and writes the `.Rdata` bundle every Python script consumes |
+| [get_int_nettoa_longrun_data.R](get_int_nettoa_longrun_data.R) | Reads LongRunMIP NetCDF and writes the `.Rdata` bundle every Python script consumes; with `cmip_1pctCO2`, builds the separate 1pctCO2 bundle from `/uda` |
+| [find_cmip_1pct_models.sh](find_cmip_1pct_models.sh) | Read-only discovery of the 1pctCO2 / piControl runs on `/uda/cmip{3,5,6}` (names, layouts, run lengths) |
 | [data/](data/) | `int_netToa_longrun.Rdata` — the preprocessed per-model time series; `li2012_fig1_N_vs_T.csv` — the digitized ECHAM5/MPIOM `N` and `T` the MT2 script's fifth model reads |
 | [extract_li2012_fig1.py](extract_li2012_fig1.py) | Digitizes Li et al. (2012) Fig. 1 out of the article PDF (needs `pymupdf`); writes the `li2012_fig1_*.csv` the MT2 script consumes |
 | [longrun_data_param_fit_script_2013a_allModels.py](longrun_data_param_fit_script_2013a_allModels.py) | Geoffroy 2013a two-box fit |
@@ -44,6 +45,25 @@ and plot styling with the others.
 `data/int_netToa_longrun.Rdata`. It needs the `ncdf4` R package and access to the archive, so it
 runs on the GFDL analysis machine; the resulting `.Rdata` is committed, so the Python side runs
 anywhere.
+
+The same script also builds a second, separate bundle of **1pctCO2** runs (plus their
+`piControl`, same ensemble member) for the same models, from the GFDL CMIP archives
+`/uda/cmip{3,5,6}`:
+
+```bash
+./find_cmip_1pct_models.sh                                           # discover center/model names, layouts, run lengths
+Rscript get_int_nettoa_longrun_data.R cmip_1pctCO2 --resolve-only    # check the input files only
+module load nco && Rscript get_int_nettoa_longrun_data.R cmip_1pctCO2 [--models CESM1,CM3]
+```
+
+It reads monthly `tas`, `rsdt`, `rsut`, `rlut` and turns them into annual, cos-latitude-weighted
+global means (`T2M`, `NETTOA = rsdt − rsut − rlut`). It requires at least 100 years per
+experiment and writes `data/int_netToa_1pctCO2.Rdata` (`int_nettoa_1pctCO2_data[[label]]$piControl` /
+`$"1pctCO2"`). The label → archive mapping (`cmip_runs`) and the per-archive path templates are at the
+top of the script. CMIP5/6 have no exact match for several LongRunMIP versions: CESM1 → CCSM4 and
+MPIESM11 → MPI-ESM-LR are the nearest stand-ins. If a model fails (no matching files, a gap between
+files, too short), the script says why, skips that model and exits non-zero. The fit scripts do not
+read this bundle yet.
 
 The Python scripts load that bundle through `rpy2` (`ro.r["load"](...)`, then
 `ro.globalenv["int_nettoa_longrun_data"]`) and index it per model and experiment. The R script's
