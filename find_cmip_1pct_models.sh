@@ -12,6 +12,9 @@
 #   MIN_YEARS  run length flagged as SHORT below this (default 100)
 #   FOLLOW     find symlink mode: -H (default) follows symlinked roots such as /uda/cmip6 -> CMIP6;
 #              -L follows every symlink (slower, needed if links sit deeper in the tree)
+#   MODELS     exact model dir names Stage B searches (default: the 13 in the R cmip_runs table);
+#              MODELS=all searches every Stage A match (slow on /uda)
+#   EXPT_DEPTH levels below a model dir searched for the 1pct*/piControl dirs (default 4)
 #
 # Stage A finds the model directories by name. It searches one level at a time and stops at
 #         the first level with a match, so it never walks the large trees below the models.
@@ -27,9 +30,22 @@ maxdepth=${MAXDEPTH:-7}
 inventory=${INVENTORY:-./cmip_1pct_inventory.tsv}
 min_years=${MIN_YEARS:-100}
 follow=${FOLLOW:--H}
+wanted=${MODELS:-"ncar_ccsm3_0 CCSM4 CNRM-CM6-1 EC-EARTH mpi_echam5 GISS-E2-R IPSL-CM5A-LR miroc3_2_medres HadGEM2-ES MPI-ESM-LR GFDL-CM3 GFDL-ESM2M GFDL-ESM2G"}
+expt_depth=${EXPT_DEPTH:-4}
 
 expt_re='(1pct|piControl|picntrl)'
 var_re='/(tas|rsdt|rsut|rlut)(/|$)'
+
+# Directories that cannot hold monthly atmosphere output (frequencies, realms, CMIP5/6 tables):
+# Stage B does not descend into them.
+prune_args=('(')
+for p in day Eday CFday Oday AERday 3hr E3hr CF3hr 1hr E1hr subhr CFsubhr 6hr 6hrLev 6hrPlev 6hrPlevPt \
+         yr Oyr Eyr Odec Oclim fx Ofx Efx IfxAnt IfxGre Omon Lmon LImon OImon SImon AERmon CFmon Emon EmonZ \
+         ImonAnt ImonGre ocean seaIce land landIce ocnBgchem aerosol; do
+   [ ${#prune_args[@]} -gt 1 ] && prune_args+=(-o)
+   prune_args+=(-name "$p")
+done
+prune_args+=(')')
 
 # find(1) arguments:  ( -iname '*p1*' -o -iname '*p2*' ... )
 name_args=('(')
@@ -83,18 +99,32 @@ for root in "${roots[@]}"; do
 
    # ---- Stage B: the files ---------------------------------------------------------------
    before=$(wc -l < "$inventory")
+   echo "Stage B (models: ${wanted}):"
    while IFS= read -r dir; do
       model=$(basename "$dir")
       center=$(basename "$(dirname "$dir")")
       [ "$found" -gt 3 ] && center=-
-      # In DRS layouts the experiments are children of the model dir; search only the wanted ones.
+      if [ "$wanted" != all ] && ! printf ' %s ' $wanted | grep -qF " $model "; then continue; fi
+      printf '  %s ... ' "$dir"
+      t0=$(date +%s); n0=$(wc -l < "$inventory")
+      # Locate the wanted experiment dirs a few levels down, then search only inside them.
+      # (Deep layouts already have the experiment above the model dir.)
       search=()
-      while IFS= read -r kid; do search+=("$dir/$kid"); done < <(ls "$dir" 2>/dev/null | grep -E "^${expt_re}")
-      [ ${#search[@]} -eq 0 ] && search=("$dir")
-      find "$follow" "${search[@]}" -type f -name '*.nc' \
-           '(' -name 'tas_*' -o -name 'rsdt_*' -o -name 'rsut_*' -o -name 'rlut_*' ')' \
-           '(' -path '*1pct*' -o -path '*piControl*' -o -path '*picntrl*' ')' \
-           '(' -path '*Amon*' -o -path '*/mo/*' ')' 2>>"$tmpd/errors" |
+      if [ "$found" -le 3 ]; then
+         while IFS= read -r e; do search+=("$e"); done < <(
+            find "$follow" "$dir" -mindepth 1 -maxdepth "$expt_depth" -type d \
+                 '(' -name '1pct*' -o -name piControl -o -name picntrl ')' -prune -print 2>>"$tmpd/errors")
+      fi
+      if [ ${#search[@]} -eq 0 ]; then
+         search=("$dir")
+         [ "$found" -le 3 ] && printf '(no 1pct*/piControl dir within %s levels: searching the whole tree) ' "$expt_depth"
+      fi
+      find "$follow" "${search[@]}" \
+           '(' -type d "${prune_args[@]}" -prune ')' -o \
+           '(' -type f -name '*.nc' \
+               '(' -name 'tas_*' -o -name 'rsdt_*' -o -name 'rsut_*' -o -name 'rlut_*' ')' \
+               '(' -path '*1pct*' -o -path '*piControl*' -o -path '*picntrl*' ')' \
+               '(' -path '*Amon*' -o -path '*/mon/*' -o -path '*/mo/*' ')' -print ')' 2>>"$tmpd/errors" |
       awk -v era="$era" -v model="$model" -v center="$center" '
          BEGIN { FS = "/"; OFS = "\t" }
          {
@@ -116,6 +146,7 @@ for root in "${roots[@]}"; do
             }
             print era, center, model, expt, member, grid, version, var, start, end, path
          }' >> "$inventory"
+      echo "$(( $(wc -l < "$inventory") - n0 )) files, $(( $(date +%s) - t0 )) s"
    done < "$tmpd/hits"
    after=$(wc -l < "$inventory")
    echo "Stage B: $((after - before)) files."
