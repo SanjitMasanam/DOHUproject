@@ -197,31 +197,66 @@ resolve_one = function(run, expt, var, member){
    }
    mem = choose("member", member_pref)
    grd = choose("grid", "gn")
-   ver = choose("version", latest = TRUE)
 
    mo = file_months(df$path)
-   o  = order(mo[, 1], df$path)
-   df = df[o, , drop = FALSE]; mo = mo[o, , drop = FALSE]
-   nmonths = NA
-   if (!anyNA(mo)){
-      bad = which(mo[-1, 1] != mo[-nrow(mo), 2] + 1)
-      if (length(bad)){
-         i = bad[1]
-         cmip_fail(ctx, if (mo[i + 1, 1] > mo[i, 2] + 1) "gap" else "overlap", " between\n   ",
-                   df$path[i], " (ends ", ym_str(mo[i, 2]), ")\n   ",
-                   df$path[i + 1], " (starts ", ym_str(mo[i + 1, 1]), ")")
-      }
-      nmonths = mo[nrow(mo), 2] - mo[1, 1] + 1
-      if (nmonths / 12 < min_years)
-         cmip_fail(ctx, sprintf("only %.1f years (%s to %s, %d files); need %d. Member %s -- set member in cmip_runs to try another.",
-                                nmonths / 12, ym_str(mo[1, 1]), ym_str(mo[nrow(mo), 2]), nrow(df), min_years, mem))
+   if (anyNA(mo)){
+      # No dates in the file names (cmip3): one version, ordered by name, checked when read.
+      ver = choose("version", latest = TRUE)
+      o   = order(df$path)
+      df  = df[o, , drop = FALSE]; mo = mo[o, , drop = FALSE]
+   } else {
+      # Versions are merged, newest first (longest file first within a version): a file is kept
+      # unless it overlaps one already kept. This fills holes left by partial republications and
+      # drops duplicated periods.
+      keep = logical(nrow(df))
+      for (i in order(df$version, mo[, 2] - mo[, 1], decreasing = TRUE, na.last = TRUE))
+         if (!any(keep & mo[, 1] <= mo[i, 2] & mo[, 2] >= mo[i, 1])) keep[i] = TRUE
+      if (any(!keep)) notes = c(notes, sprintf("dropped %d of %d files overlapping newer/kept ones", sum(!keep), nrow(df)))
+      df  = df[keep, , drop = FALSE]; mo = mo[keep, , drop = FALSE]
+      o   = order(mo[, 1])
+      df  = df[o, , drop = FALSE]; mo = mo[o, , drop = FALSE]
+      vs  = sort(unique(df$version[!is.na(df$version)]), decreasing = TRUE)
+      ver = if (length(vs)) paste(vs, collapse = "+") else NA
    }
+   gaps = if (anyNA(mo)) integer(0) else which(mo[-1, 1] != mo[-nrow(mo), 2] + 1)
    cat(sprintf("  %-9s %-5s %s%s%s: %d file(s), %s\n", expt, var, mem,
                if (!is.na(grd)) paste0(" ", grd) else "", if (!is.na(ver)) paste0(" ", ver) else "", nrow(df),
-               if (is.na(nmonths)) "no dates in file names (checked when read)"
-               else sprintf("%s to %s (%.1f yr)", ym_str(mo[1, 1]), ym_str(mo[nrow(mo), 2]), nmonths / 12)))
-   for (n in notes) cat("              chose", n, "\n")
-   list(files = df$path, member = mem, grid = grd, version = ver)
+               if (anyNA(mo)) "no dates in file names (checked when read)"
+               else sprintf("%s to %s%s", ym_str(mo[1, 1]), ym_str(mo[nrow(mo), 2]),
+                            if (length(gaps)) sprintf(" with %d gap(s)", length(gaps)) else "")))
+   for (n in notes) cat("              ", n, "\n")
+   list(files = df$path, months = mo, member = mem, grid = grd, version = ver)
+}
+
+# The stretch of months all four variables cover without a gap: for 1pctCO2 the one starting at
+# the beginning of the run, for piControl the longest. Returns full calendar years c(first, last),
+# or NULL when the file names carry no dates (cmip3: checked when read).
+choose_window = function(rv, ex, ctx){
+   if (any(vapply(rv, function(r) anyNA(r$months), TRUE))) return(NULL)
+   cover = Reduce(intersect, lapply(rv, function(r) unlist(Map(seq, r$months[, 1], r$months[, 2]))))
+   if (!length(cover)) cmip_fail(ctx, "the four variables have no months in common")
+   cover = sort(cover)
+   brk   = which(diff(cover) != 1)
+   s     = cover[c(1, brk + 1)]
+   e     = cover[c(brk, length(cover))]
+   y0    = s %/% 12 + (s %% 12 != 0)                  # first full year of each stretch
+   y1    = e %/% 12 - (e %% 12 != 11)                 # last full year
+   n     = pmax(y1 - y0 + 1, 0)
+   segs  = paste(sprintf("%s to %s (%d yr)", ym_str(s), ym_str(e), n), collapse = "; ")
+   if (ex == "1pctCO2"){
+      run_start = min(vapply(rv, function(r) r$months[1, 1], 0))
+      if (s[1] != run_start)
+         cmip_fail(ctx, "not all four variables start at the beginning of the run (", ym_str(run_start),
+                   "); stretches covered by all four: ", segs)
+      k = 1
+   } else k = which.max(n)
+   if (n[k] < min_years)
+      cmip_fail(ctx, sprintf("only %d full years %s by all four variables (need %d). Stretches: %s",
+                             n[k], if (ex == "1pctCO2") "from the start of the run are covered" else "in one unbroken stretch are covered",
+                             min_years, segs))
+   cat(sprintf("  %-9s using %04d-%04d (%d yr)%s\n", ex, y0[k], y1[k], n[k],
+               if (length(s) > 1) paste0("; stretches covered by all four: ", segs) else ""))
+   c(y0[k], y1[k])
 }
 
 # Every (experiment, variable) of one run. The 1pctCO2 tas member fixes the member for the rest.
@@ -241,6 +276,14 @@ resolve_run = function(run){
       out[[ex]] = list(experiment = names_[[ex]], member = members[[ex]])
       for (v in cmip_vars)
          out[[ex]][[v]] = if (ex == "1pctCO2" && v == "tas") first else resolve_one(run, names_[[ex]], v, members[[ex]])
+      win = choose_window(out[[ex]][cmip_vars], ex, paste(run$label, names_[[ex]]))
+      out[[ex]]$window = win
+      if (!is.null(win)) for (v in cmip_vars){           # read only the files that overlap it
+         r = out[[ex]][[v]]
+         k = r$months[, 2] >= win[1] * 12 & r$months[, 1] <= win[2] * 12 + 11
+         out[[ex]][[v]]$files  = r$files[k]
+         out[[ex]][[v]]$months = r$months[k, , drop = FALSE]
+      }
    }
    out
 }
@@ -375,6 +418,13 @@ process_run = function(run, res){
             cat("    experiment attribute:", expt_attr, "\n")
          }
       }
+      # Cut to the window chosen at resolve time, if any.
+      if (!is.null(r$window)) ann = lapply(ann, function(a){
+         if (is.na(a$start) || a$start > r$window[1] || a$start + length(a$x) - 1 < r$window[2])
+            cmip_fail(paste(run$label, r$experiment), sprintf("data read (start %s, %d yr) do not cover the chosen years %d-%d; the dates in the file names and the time axis disagree",
+                                                       a$start, length(a$x), r$window[1], r$window[2]))
+         list(x = a$x[(r$window[1] - a$start + 1):(r$window[2] - a$start + 1)], start = r$window[1])
+      })
       # Align the variables on common years (by calendar year when known, else from the start).
       starts = vapply(ann, `[[`, 0, "start")
       lens   = vapply(ann, function(a) length(a$x), 0L)
