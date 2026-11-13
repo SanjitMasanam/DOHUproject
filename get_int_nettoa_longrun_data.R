@@ -7,6 +7,12 @@
 #        --resolve-only   only find and check the input files (no reading: needs neither ncdf4 nor NCO)
 #        --models A,B     only these labels (see cmip_runs below)
 #        --redo           recompute the selected models even if they have a checkpoint
+#        --jobs N         read N files at once (default n_jobs below); each line "read ..." gives
+#                         the seconds per variable, to see what is slow
+#
+# Models can also run as separate processes; each saves its own checkpoint, and every process
+# writes the bundle with all models finished so far (the last one to end has them all):
+#   (bash) for m in CCSM3 CESM1 CNRMCM6 ...; do Rscript get_int_nettoa_longrun_data.R cmip_1pctCO2 --models $m --jobs 2 > log_$m.txt 2>&1 & done; wait
 #
 # Each model that finishes is checkpointed to cmip_ckpt_dir, so a rerun after an interruption
 # (or a failure) only does the models still missing. A checkpoint is reused only while that
@@ -27,6 +33,9 @@ resolve_only = "--resolve-only" %in% args
 redo         = "--redo" %in% args
 i_models     = match("--models", args)
 model_subset = if (is.na(i_models)) NULL else strsplit(args[i_models + 1], ",")[[1]]
+i_jobs       = match("--jobs", args)
+jobs_arg     = if (is.na(i_jobs)) NA_integer_ else suppressWarnings(as.integer(args[i_jobs + 1]))
+if (!is.na(i_jobs) && (is.na(jobs_arg) || jobs_arg < 1)) stop("--jobs needs a positive number, e.g. --jobs 4")
 if (!dataset %in% c("longrunmip", "cmip_1pctCO2"))
    stop("unknown dataset '", dataset, "': use longrunmip (default) or cmip_1pctCO2")
 if (!is.null(model_subset) && anyNA(model_subset)) stop("--models needs a value, e.g. --models CESM1,CM3")
@@ -45,6 +54,7 @@ cmip_root    = c(cmip3 = file.path(uda, "cmip3"), cmip5 = file.path(uda, "cmip5"
 min_years    = 100                                # both experiments must have at least this many
 max_years    = 100   # ...and keep only their first max_years (Inf = all); files past it are not read
 spatial_mean = "nco"   # "nco": ncap2 does the area mean (needs `module load nco`); "r": ncdf4 in R
+n_jobs       = if (is.na(jobs_arg)) 4L else jobs_arg   # files read at once (--jobs N); 1 = one by one
 cmip_vars    = c("tas", "rsdt", "rsut", "rlut")
 cmip_out     = "./data/int_netToa_1pctCO2.Rdata"
 cmip_ckpt_dir = "./data/cmip_1pctCO2_checkpoints"  # one <label>.rds per finished model (git-ignored)
@@ -330,13 +340,14 @@ decode_ym = function(t, units, calendar){
    c(y0 + tot %/% sum(ml), findInterval(tot %% sum(ml), cumsum(c(0, ml))))
 }
 
-# Area-weighted global mean of a (lon, lat, time) variable, by ncap2 or in R.
-nco_global_mean = function(path, var, latn, lonn, ctx){
+# Area-weighted global mean of a (lon, lat, time) variable, by ncap2 or in R. `hyper` is an
+# optional ncap2 hyperslab (c("-d", "time,i0,i1")) so only the needed months are read.
+nco_global_mean = function(path, var, latn, lonn, ctx, hyper = character(0)){
    tmp  = tempfile(fileext = ".nc")
    on.exit(unlink(tmp))
    expr = sprintf("w=cos(%s*3.14159265358979/180.0); gm=(%s*w).total($%s,$%s)/(w.total()*$%s.size);",
                   latn, var, latn, lonn, lonn)
-   out  = suppressWarnings(system2("ncap2", c("-O", "-v", "-s", shQuote(expr), shQuote(path), shQuote(tmp)),
+   out  = suppressWarnings(system2("ncap2", c("-O", "-v", hyper, "-s", shQuote(expr), shQuote(path), shQuote(tmp)),
                                    stdout = TRUE, stderr = TRUE))
    st   = attr(out, "status")
    if (!is.null(st) && st != 0)
@@ -347,25 +358,25 @@ nco_global_mean = function(path, var, latn, lonn, ctx){
    as.vector(ncvar_get(nc, "gm"))
 }
 
-r_global_mean = function(nc, var, lat, ilat, ilon, itime){
-   nt  = nc$var[[var]]$dim[[itime]]$len
+r_global_mean = function(nc, var, lat, ilat, ilon, itime, idx){
    w   = cos(lat * pi / 180)
-   out = numeric(nt)
-   for (s in seq(1, nt, by = 120)){                   # 10 years at a time keeps memory small
-      n = min(120, nt - s + 1)
+   out = numeric(length(idx))
+   i1  = idx[length(idx)]
+   for (s in seq(idx[1], i1, by = 120)){              # 10 years at a time keeps memory small
+      n = min(120, i1 - s + 1)
       start = c(1, 1, 1); count = c(-1, -1, -1); start[itime] = s; count[itime] = n
       a = ncvar_get(nc, var, start = start, count = count, collapse_degen = FALSE)
       a = aperm(a, c(ilon, ilat, itime))              # -> lon, lat, time
-      out[s:(s + n - 1)] = colSums(colMeans(a, dims = 1) * w) / sum(w)
+      out[(s - idx[1] + 1):(s - idx[1] + n)] = colSums(colMeans(a, dims = 1) * w) / sum(w)
    }
    out
 }
 
-# One file: monthly global means plus its time axis and month lengths (from the time bounds).
-read_global_mean = function(path, var, ctx){
-   nc = nc_open(path)
-   on.exit(nc_close(nc))
-   v  = nc$var[[var]]
+# A variable's (lon, lat, time) layout and its time axis. Time stamps are the mid-points of the
+# time bounds when there are bounds (some models stamp each month at its end, which would decode
+# as the next month), else the time values; w = month lengths from the bounds, NULL without them.
+nc_layout = function(nc, var, path, ctx){
+   v = nc$var[[var]]
    if (is.null(v)) cmip_fail(ctx, "variable '", var, "' not in ", path, " (has: ", paste(names(nc$var), collapse = ", "), ")")
    dn    = vapply(v$dim, `[[`, "", "name")
    ilat  = grep("^lat", dn, ignore.case = TRUE)
@@ -379,14 +390,74 @@ read_global_mean = function(path, var, ctx){
    cal  = if (cal$hasatt) cal$value else "standard"
    bn   = ncatt_get(nc, dn[itime], "bounds")
    bn   = if (bn$hasatt) bn$value else intersect(c("time_bnds", "time_bounds"), names(nc$var))[1]
-   w    = if (!is.na(bn) && !is.null(nc$var[[bn]])){ b = ncvar_get(nc, bn); b[2, ] - b[1, ] } else NULL
-   gm   = if (spatial_mean == "nco") nco_global_mean(path, var, dn[ilat], dn[ilon], ctx)
-          else r_global_mean(nc, var, v$dim[[ilat]]$vals, ilat, ilon, itime)
-   if (length(gm) != tdim$len) cmip_fail(ctx, "global mean has ", length(gm), " steps, time axis ", tdim$len, " in ", path)
+   b    = if (!is.na(bn) && !is.null(nc$var[[bn]])) matrix(ncvar_get(nc, bn), nrow = 2) else NULL
+   if (!is.null(b) && ncol(b) != tdim$len) b = NULL
+   list(v = v, dn = dn, ilat = ilat, ilon = ilon, itime = itime, len = tdim$len,
+        units = tdim$units, cal = cal,
+        mid = if (!is.null(b)) colMeans(b) else tdim$vals,
+        w   = if (!is.null(b)) b[2, ] - b[1, ] else NULL)
+}
+
+# One file: monthly global means plus its time axis and month lengths. With `years`, only the
+# months in those calendar years are read (an ncap2 hyperslab); NULL if the file has none.
+read_global_mean = function(path, var, ctx, years = NULL){
+   nc = nc_open(path)
+   on.exit(nc_close(nc))
+   L   = nc_layout(nc, var, path, ctx)
+   idx = seq_len(L$len)
+   if (!is.null(years)){
+      yr = vapply(L$mid, function(t) decode_ym(t, L$units, L$cal)[1], 0)
+      if (anyNA(yr)) cmip_fail(ctx, "cannot decode the time axis of ", path, " (units '", L$units, "', calendar '",
+                               L$cal, "') to pick the years ", years[1], "-", years[2])
+      idx = which(yr >= years[1] & yr <= years[2])
+      if (!length(idx)) return(NULL)
+      idx = idx[1]:idx[length(idx)]
+   }
+   part  = length(idx) < L$len
+   hyper = if (part) c("-d", sprintf("%s,%d,%d", L$dn[L$itime], idx[1] - 1L, idx[length(idx)] - 1L)) else character(0)
+   gm    = if (spatial_mean == "nco") nco_global_mean(path, var, L$dn[L$ilat], L$dn[L$ilon], ctx, hyper)
+           else r_global_mean(nc, var, L$v$dim[[L$ilat]]$vals, L$ilat, L$ilon, L$itime, idx)
+   if (length(gm) != length(idx))
+      cmip_fail(ctx, "global mean has ", length(gm), " steps, expected ", length(idx), " in ", path,
+                if (part) paste0(" (time subset ", paste(hyper, collapse = " "), ")") else "")
    ea = ncatt_get(nc, 0, "experiment")                # long description (cmip3/5), e.g. "1%/year CO2 increase"
    if (!ea$hasatt) ea = ncatt_get(nc, 0, "experiment_id")
-   list(x = gm, time = tdim$vals, units = tdim$units, calendar = cal, w = w,
-        expt_attr = if (ea$hasatt) as.character(ea$value) else NA_character_)
+   list(x = gm, time = L$mid[idx], units = L$units, calendar = L$cal, w = if (!is.null(L$w)) L$w[idx],
+        expt_attr = if (ea$hasatt) as.character(ea$value) else NA_character_,
+        used = length(idx), steps = L$len)
+}
+
+# cmip3 file names carry no dates: the first max_years full years all four variables have, from
+# the start of each variable's first file. NULL (read whole files, cut afterwards) if a start
+# date can't be decoded.
+cmip3_years = function(r, ctx){
+   y0 = vapply(cmip_vars, function(v){
+      f  = r[[v]]$files[1]
+      nc = nc_open(f)
+      on.exit(nc_close(nc))
+      L  = nc_layout(nc, v, f, ctx)
+      ym = decode_ym(L$mid[1], L$units, L$cal)
+      ym[1] + (ym[2] != 1)
+   }, 0)
+   if (anyNA(y0)){
+      cat("  note:", ctx, "start date could not be decoded; reading whole files\n")
+      return(NULL)
+   }
+   c(max(y0), max(y0) + max_years - 1)
+}
+
+# lapply over n_jobs forked workers. A worker's error is re-raised here (the first one in task
+# order), so failures read the same as in a serial run.
+par_map = function(xs, f){
+   if (n_jobs <= 1 || length(xs) <= 1) return(lapply(xs, f))
+   out = parallel::mclapply(xs, function(x) tryCatch(f(x), error = function(e) e),
+                            mc.cores = min(n_jobs, length(xs)), mc.preschedule = FALSE)
+   for (o in out){
+      if (inherits(o, "error")) stop(o)
+      if (inherits(o, "try-error") || is.null(o))
+         stop("a worker died without an error message (out of memory?); try a smaller --jobs", call. = FALSE)
+   }
+   out
 }
 
 # Monthly pieces (files in order) -> annual means from the first January, weighted by month length.
@@ -420,14 +491,36 @@ annualise = function(pieces, ctx){
 
 # Read, average and combine all variables of a resolved run.
 process_run = function(run, res){
+   # Every file of the run is one task, read n_jobs at a time, each only for the years it needs.
+   wall0 = proc.time()[["elapsed"]]
+   tasks = list()
+   for (ex in c("piControl", "1pctCO2")){
+      r   = res[[ex]]
+      yrs = if (!is.null(r$window)) r$window
+            else if (is.finite(max_years)) cmip3_years(r, paste(run$label, r$experiment)) else NULL
+      for (v in cmip_vars) for (f in r[[v]]$files)
+         tasks[[length(tasks) + 1]] = list(ex = ex, v = v, file = f, years = yrs,
+                                           ctx = paste(run$label, r$experiment, v))
+   }
+   cat(sprintf("  reading %d file(s), %d at a time\n", length(tasks), min(n_jobs, length(tasks))))
+   got = par_map(tasks, function(tk){
+      t0 = proc.time()[["elapsed"]]
+      p  = read_global_mean(tk$file, tk$v, tk$ctx, tk$years)
+      list(p = p, secs = proc.time()[["elapsed"]] - t0, mb = file.size(tk$file) / 1e6)
+   })
+
    out = list()
    for (ex in c("piControl", "1pctCO2")){
       r   = res[[ex]]
       ann = list()
       for (v in cmip_vars){
-         ctx = paste(run$label, r$experiment, v)
-         cat(sprintf("  reading %-9s %-5s (%d file(s))\n", r$experiment, v, length(r[[v]]$files)))
-         pieces   = lapply(r[[v]]$files, read_global_mean, var = v, ctx = ctx)
+         ctx    = paste(run$label, r$experiment, v)
+         g      = got[vapply(tasks, function(tk) tk$ex == ex && tk$v == v, TRUE)]
+         pieces = Filter(Negate(is.null), lapply(g, `[[`, "p"))
+         cat(sprintf("  read %-9s %-5s %3d file(s), %7.0f MB on disk, %6.1f s, used %d of %d months\n",
+                     r$experiment, v, length(g), sum(vapply(g, `[[`, 0, "mb")), sum(vapply(g, `[[`, 0, "secs")),
+                     sum(vapply(pieces, `[[`, 0L, "used")), sum(vapply(pieces, `[[`, 0L, "steps"))))
+         if (!length(pieces)) cmip_fail(ctx, "none of its files has months in the years to read")
          ann[[v]] = annualise(pieces, ctx)
          if (v == "tas"){
             expt_attr = pieces[[1]]$expt_attr
@@ -457,6 +550,9 @@ process_run = function(run, res){
                        member = r$tas$member,
                        file = unlist(lapply(cmip_vars, function(v) r[[v]]$files)))
    }
+   cat(sprintf("  read %d file(s) (%.0f MB on disk) in %.1f s wall; %.1f s summed over files\n",
+               length(got), sum(vapply(got, `[[`, 0, "mb")), proc.time()[["elapsed"]] - wall0,
+               sum(vapply(got, `[[`, 0, "secs"))))
    pe = res[["1pctCO2"]]$experiment
    f  = expt_forcing[[paste(run$era, pe, sep = "/")]]
    if (is.null(f)) f = expt_forcing[[pe]]
@@ -586,7 +682,9 @@ if (dataset == "cmip_1pctCO2"){
          models = names(cmip_data); Nmodels = length(models)
          expts  = c("piControl", "1pctCO2"); vars = c("T2M", "NETTOA")
          int_nettoa_1pctCO2_data = cmip_data
-         save(models, Nmodels, expts, vars, int_nettoa_1pctCO2_data, file = cmip_out)
+         tmp = paste0(cmip_out, ".tmp", Sys.getpid())   # atomic: parallel runs may save at once
+         save(models, Nmodels, expts, vars, int_nettoa_1pctCO2_data, file = tmp)
+         file.rename(tmp, cmip_out)
          cat("Saved", Nmodels, "model(s) to", cmip_out, "\n")
       } else cat("Nothing to save.\n")
    }
