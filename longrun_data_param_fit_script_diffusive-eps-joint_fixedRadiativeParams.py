@@ -1888,7 +1888,10 @@ for run_type in RUN_TYPES:
                   0.02,
                   0.92,
                   # rf"$\tau_{{1b}}$ = {tau:.0f} yrs" + "\n" + rf"T$_d$ = {T:.0f} yrs, D$_d$ =  {D:.2e} m^2/s" + "\n" + 
-                  rf"$\kappa_{{1b+d}}$ = {kappa_pde:.1e} m^2/s, h$_{{ml}}$ = {h_ml_pde:.0f} m, $\epsilon$ = {eps:.2f}",
+                  rf"$\kappa_{{1b+d}}$ = {kappa_pde:.1e} m^2/s, h$_{{ml}}$ = {h_ml_pde:.0f} m, $\epsilon$ = {eps:.2f}" + "\n" +
+                  # Diffusive height/timescale H = D/V_beta, T = D/V_beta^2 with
+                  # V_beta = lambda/rho_cp, i.e. H = kappa*rho_cp/lambda, T = H^2/kappa.
+                  rf"$\mathcal{{T}}$ = {T:.0f} yrs, $\mathcal{{H}}$ = {kappa_pde * RHO_CP / lmbda:.0f} m",
                   transform=ax.transAxes,
                   va="top",
                   ha="left",

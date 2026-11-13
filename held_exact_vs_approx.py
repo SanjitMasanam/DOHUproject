@@ -251,7 +251,7 @@ axes[3].set(xlabel="time (yrs)",
             ylabel=r"$\kappa_N=\dfrac{F(t)-\lambda T}{T}$ [W m$^{-2}$ K$^{-1}$]",
             title=rf"(d) heat-uptake efficiency ($\lambda$={LAMBDA0:.3f} W m$^{{-2}}$ K$^{{-1}}$)"
                   + _dashed,
-            xlim=(t_d[0], TMAX))
+            xlim=(t_d[0], TMAX), ylim=(0, 5))
 axes[3].legend(fontsize=8, loc="upper right")
 
 print("kappa_N = (F - lambda*T)/T  [W m^-2 K^-1]:  (f-r)/r form vs dimensional N/T")
