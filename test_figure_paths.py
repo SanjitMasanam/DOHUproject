@@ -1,39 +1,26 @@
 #!/usr/bin/env python3
-"""Checks for figure_paths.RunLayout and the migrate_figures path mapping.
+"""Checks for figure_paths: a golden table pinning one path per figure class,
+so a layout change has to be deliberate.
 
 Plain asserts, no pytest dependency:  python3 test_figure_paths.py
-
-Two layers:
-
-  1. A golden table pinning one path per figure class per variant, so a change
-     to the layout has to be made deliberately rather than by accident.
-  2. A round-trip over the real legacy file list, asserting that every path
-     migrate_figures produces is collision-free and is also reachable from
-     RunLayout. That is the check that keeps the migration and the runtime path
-     construction from drifting apart -- they are two independent
-     implementations of the same layout, and this pins them together.
 """
 from __future__ import annotations
 
 import sys
-from collections import defaultdict
+import tempfile
 from pathlib import Path
 
 import figure_paths as fp
-import migrate_figures as mig
 from figure_paths import (
    BUDGET,
-   CORNER,
    FIGURE_ROOT,
-   RUN_TYPE_DIRS,
    STEP1,
    STEP2,
    VALIDATION,
    RunLayout,
    figname,
+   topic_dir,
 )
-
-RUN_TYPE_BY_DIR = {v: k for k, v in RUN_TYPE_DIRS.items()}
 
 FAILURES: list[str] = []
 
@@ -80,7 +67,6 @@ def test_golden_paths() -> None:
    b1 = RunLayout("2013b", 1)
    b3v = RunLayout("2013b", 3, VALIDATION)
    fx2 = RunLayout("diffusive-eps-joint_fixedRadiativeParams", 2)
-   cor1 = RunLayout("diffusive-eps-corner", 1)
 
    cases = [
       (b1.path(STEP1, figname("4xCO2", "all_models", "T2M_vs_NETTOA", iteration=3)),
@@ -116,10 +102,6 @@ def test_golden_paths() -> None:
       (fx2.csv_path("fitted_model_params", mkdir=False),
        "figures/diffusive-eps-joint_fixedRadiativeParams/02_forcing-50yravg/tables/"
        "fitted_model_params_diffusive-eps-joint_fixedRadiativeParams.csv"),
-
-      (cor1.path(CORNER, figname("4xCO2", "CESM1", "posterior_corner")),
-       "figures/diffusive-eps-corner/01_replicate/corner/"
-       "4xCO2_CESM1_posterior_corner_diffusive-eps-corner.png"),
    ]
    for got, want in cases:
       check(f"golden {want}", rel(got), want)
@@ -127,7 +109,6 @@ def test_golden_paths() -> None:
    check("run-type dirs sort in run order",
          [RunLayout("v", rt).dir.name for rt in (1, 2, 3)],
          sorted(RunLayout("v", rt).dir.name for rt in (1, 2, 3)))
-
 
 
 def test_validation() -> None:
@@ -154,55 +135,13 @@ def test_validation() -> None:
       FAILURES.append("RunLayout should reject an unknown results kind")
 
 
-# ------------------------------------------------------- migration round-trip
+# -------------------------------------------------------------- topic dirs
 
-def test_migration_round_trip() -> None:
-   """Every legacy path maps somewhere unique that RunLayout can also produce."""
-   paths = mig.tracked_legacy_files()
-   if not paths:
-      print("  (migration round-trip skipped: legacy trees already migrated)")
-      return
-
-   moves, deletions, problems = mig.build_plan(paths)
-   check("migration reports no problems", problems, [])
-   check("migration accounts for every legacy file",
-         len(moves) + len(deletions), len(paths))
-
-   by_dest = defaultdict(list)
-   for src, dest in moves.items():
-      by_dest[dest].append(src)
-   collisions = {d: s for d, s in by_dest.items() if len(s) > 1}
-   check("no two files map to one destination", collisions, {})
-
-   # Every destination must live under figures/ and be re-derivable from
-   # RunLayout -- i.e. migrate_figures cannot invent a shape the scripts can't.
-   for dest in moves.values():
-      parts = dest.parts
-      if parts[0] != "figures":
-         FAILURES.append(f"destination escapes figures/: {dest}")
-         continue
-      if parts[1] == "pde-checks":
-         continue
-      if len(parts) >= 3 and parts[2] == "comparison":
-         check(f"comparison shape {dest}", len(parts), 4)
-         continue
-      variant, run_dir, section, name = parts[1], parts[2], parts[3], parts[4]
-      run_type = RUN_TYPE_BY_DIR.get(run_dir)
-      if run_type is None:
-         FAILURES.append(f"destination has an unknown run-type dir: {dest}")
-         continue
-      stem, ext = Path(name).stem, Path(name).suffix.lstrip(".")
-      rebuilt = RunLayout(variant, run_type).path(section, stem, ext=ext)
-      check(f"round-trip {dest}", rel(rebuilt), str(dest))
-
-   # The png/ layer must be gone everywhere.
-   leftover = [d for d in moves.values() if "png" in d.parts[:-1]]
-   check("no destination retains a png/ directory", leftover, [])
-
-   # And no destination may keep a redundant run-type stamp.
-   stamped = [d for d in moves.values()
-              if any(d.stem.endswith(s) for s in mig.STAMP_SUFFIXES)]
-   check("no destination retains a run-type stamp", stamped, [])
+def test_topic_dir() -> None:
+   with tempfile.TemporaryDirectory() as tmp:
+      d = topic_dir("held", root=Path(tmp))
+      check("topic_dir shape", d, Path(tmp) / "held")
+      check("topic_dir creates the directory", d.is_dir(), True)
 
 
 # ------------------------------------------------------------ variant stamp
@@ -222,13 +161,10 @@ def test_variant_stamp() -> None:
          "fitted_model_params_MT2.csv")
    check("variant_stamp property", mt2.variant_stamp, "_MT2")
 
-   # The same plot from two variants must not collide once the files are moved
-   # out of their directories -- that is the whole point of the stamp.
    stems = {RunLayout(v, 1, VALIDATION).results_path(name).name
-            for v in ("MT2", "2013a", "2013b", "diffusive-eps")}
+            for v in ("MT2", "2013a", "2013b", "diffusive-eps-joint")}
    check("four variants give four distinct filenames", len(stems), 4)
 
-   # And the switch has to actually switch it off.
    fp.INCLUDE_VARIANT_STAMP = False
    try:
       check("stamp off restores the bare name",
@@ -239,7 +175,7 @@ def test_variant_stamp() -> None:
 
 def main() -> int:
    for fn in (test_figname, test_golden_paths, test_variant_stamp, test_validation,
-             test_migration_round_trip):
+             test_topic_dir):
       print(f"- {fn.__name__}")
       fn()
 

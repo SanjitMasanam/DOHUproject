@@ -13,6 +13,10 @@ __pycache__/
 # macOS Finder metadata.
 .DS_Store
 
+# R session files.
+.RData
+.Rhistory
+
 # Local Claude Code instructions.
 CLAUDE.md
 rogers2023/

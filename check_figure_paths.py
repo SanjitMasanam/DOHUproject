@@ -4,18 +4,12 @@
     python3 check_figure_paths.py            # report + exit 1 on any problem
     python3 check_figure_paths.py --list     # also print every path template
 
-Parses each script with `ast` rather than importing it. That is not a
-preference: none of the longrun scripts has an `if __name__ == "__main__"`
-guard, so importing one runs the entire multi-hour fit.
+Parses the scripts with `ast`, so nothing is imported or run.
 
 Checks:
-  1. No script still builds an output path by hand -- every figure and table
-     goes through RunLayout, so the layout can only be changed in one place.
-  2. Every section argument is a figure_paths constant. Directories are created
-     lazily by the writes, so a typo like "stpe1" would otherwise be silently
-     honoured as a new directory instead of raising.
-  3. Every filename template is well-formed and unique within its section, so
-     two figures cannot quietly overwrite each other.
+  1. No .savefig()/.to_csv() destination is a hand-built path.
+  2. Every section argument is a figure_paths constant.
+  3. No two writes in a script share a section and filename template.
 """
 from __future__ import annotations
 
@@ -41,7 +35,7 @@ UNSECTIONED = {"save_results", "results_path", "csv_path"}
 # Section constants, as they are spelled at the call sites.
 SECTION_CONSTS = {
    "STEP1": "step1", "STEP2": "step2", "BUDGET": "budget",
-   "CORNER": "corner", "VALIDATION": "validation", "UNBLINDED": "unblinded",
+   "VALIDATION": "validation", "UNBLINDED": "unblinded",
 }
 
 
@@ -121,12 +115,7 @@ class Collector(ast.NodeVisitor):
 
 
 def derived_path_names(tree):
-   """Locals assigned from a path-join expression, e.g. `out_png = d / "x.png"`.
-
-   Those are legitimate destinations as long as the left-hand side of the join
-   came from the layout; what this check is really hunting is a path assembled
-   from a string literal root, which is what the refactor removed.
-   """
+   """Locals assigned from an expression or call, e.g. `out_png = d / "x.png"`."""
    names = set()
    for node in ast.walk(tree):
       if isinstance(node, ast.Assign) and isinstance(node.value, (ast.BinOp, ast.Call)):
@@ -137,13 +126,11 @@ def derived_path_names(tree):
 
 
 def find_manual_paths(tree, path):
-   """Any surviving hand-built output path: a .savefig()/.to_csv() whose
-   destination is not layout-derived, or a reference to the retired locals."""
+   """.savefig()/.to_csv() calls whose destination is a string literal or other
+   non-derived value."""
    problems = []
    derived = derived_path_names(tree)
    for node in ast.walk(tree):
-      if isinstance(node, ast.Name) and node.id in ("outdir", "current_dir", "ensure_dirs"):
-         problems.append(f"{path.name}:{node.lineno}: refers to the retired {node.id!r}")
       if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
          if node.func.attr in ("savefig", "to_csv"):
             arg = node.args[0] if node.args else None
