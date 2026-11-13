@@ -10,6 +10,8 @@
 #   MAXDEPTH   deepest directory level searched for model directories (default 7)
 #   INVENTORY  where the full file list goes (default ./cmip_1pct_inventory.tsv)
 #   MIN_YEARS  run length flagged as SHORT below this (default 100)
+#   FOLLOW     find symlink mode: -H (default) follows symlinked roots such as /uda/cmip6 -> CMIP6;
+#              -L follows every symlink (slower, needed if links sit deeper in the tree)
 #
 # Stage A finds the model directories by name. It searches one level at a time and stops at
 #         the first level with a match, so it never walks the large trees below the models.
@@ -24,6 +26,7 @@ patterns=${PATTERNS:-"ccsm3 ccsm4 cesm1 cnrm-cm6 ec-earth ecearth echam5 giss-e2
 maxdepth=${MAXDEPTH:-7}
 inventory=${INVENTORY:-./cmip_1pct_inventory.tsv}
 min_years=${MIN_YEARS:-100}
+follow=${FOLLOW:--H}
 
 expt_re='(1pct|piControl|picntrl)'
 var_re='/(tas|rsdt|rsut|rlut)(/|$)'
@@ -58,7 +61,7 @@ for root in "${roots[@]}"; do
    found=0
    d=1
    while [ "$d" -le "$maxdepth" ]; do
-      find "$root" -mindepth "$d" -maxdepth "$d" -type d "${name_args[@]}" 2>>"$tmpd/errors" | sort > "$tmpd/hits"
+      find "$follow" "$root" -mindepth "$d" -maxdepth "$d" -type d "${name_args[@]}" 2>>"$tmpd/errors" | sort > "$tmpd/hits"
       if [ -s "$tmpd/hits" ]; then found=$d; break; fi
       d=$((d + 1))
    done
@@ -88,7 +91,7 @@ for root in "${roots[@]}"; do
       search=()
       while IFS= read -r kid; do search+=("$dir/$kid"); done < <(ls "$dir" 2>/dev/null | grep -E "^${expt_re}")
       [ ${#search[@]} -eq 0 ] && search=("$dir")
-      find "${search[@]}" -type f -name '*.nc' \
+      find "$follow" "${search[@]}" -type f -name '*.nc' \
            '(' -name 'tas_*' -o -name 'rsdt_*' -o -name 'rsut_*' -o -name 'rlut_*' ')' \
            '(' -path '*1pct*' -o -path '*piControl*' -o -path '*picntrl*' ')' \
            '(' -path '*Amon*' -o -path '*/mo/*' ')' 2>>"$tmpd/errors" |
