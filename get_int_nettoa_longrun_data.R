@@ -14,6 +14,10 @@
 # otherwise. The bundle always holds every model with a valid checkpoint, also when --models
 # selects only a few.
 #
+# Only the first max_years (100) of each experiment are read and saved: 1pctCO2 from the start of
+# the run, piControl from the start of its longest unbroken stretch. Raising max_years recomputes
+# the models whose checkpoints hold fewer years.
+#
 # For cmip_1pctCO2, run ./find_cmip_1pct_models.sh first: it prints the real center/model names
 # and a sample path per archive, which is what cmip_runs and path_templates below must match.
 
@@ -39,6 +43,7 @@ if (!(dataset == "cmip_1pctCO2" && resolve_only)) library(ncdf4)
 uda          = Sys.getenv("CMIP_UDA", "/uda")     # override to test against a copy of the tree
 cmip_root    = c(cmip3 = file.path(uda, "cmip3"), cmip5 = file.path(uda, "cmip5"), cmip6 = file.path(uda, "cmip6"))
 min_years    = 100                                # both experiments must have at least this many
+max_years    = 100   # ...and keep only their first max_years (Inf = all); files past it are not read
 spatial_mean = "nco"   # "nco": ncap2 does the area mean (needs `module load nco`); "r": ncdf4 in R
 cmip_vars    = c("tas", "rsdt", "rsut", "rlut")
 cmip_out     = "./data/int_netToa_1pctCO2.Rdata"
@@ -263,9 +268,11 @@ choose_window = function(rv, ex, ctx){
       cmip_fail(ctx, sprintf("only %d full years %s by all four variables (need %d). Stretches: %s",
                              n[k], if (ex == "1pctCO2") "from the start of the run are covered" else "in one unbroken stretch are covered",
                              min_years, segs))
-   cat(sprintf("  %-9s using %04d-%04d (%d yr)%s\n", ex, y0[k], y1[k], n[k],
+   last = min(y1[k], y0[k] + max_years - 1)           # only the first max_years are read
+   cat(sprintf("  %-9s using %04d-%04d (%d yr%s)%s\n", ex, y0[k], last, last - y0[k] + 1,
+               if (last < y1[k]) sprintf(" of %d available: max_years", n[k]) else "",
                if (length(s) > 1) paste0("; stretches covered by all four: ", segs) else ""))
-   c(y0[k], y1[k])
+   c(y0[k], last)
 }
 
 # Every (experiment, variable) of one run. The 1pctCO2 tas member fixes the member for the rest.
@@ -454,8 +461,24 @@ process_run = function(run, res){
    f  = expt_forcing[[paste(run$era, pe, sep = "/")]]
    if (is.null(f)) f = expt_forcing[[pe]]
    if (is.null(f)) f = list(co2_multiple = NA, ramp_years = NA)
-   c(out, list(source_model = run$model, center = run$center, era = run$era,
-               co2_multiple = f$co2_multiple, ramp_years = f$ramp_years, co2_pct_per_yr = 1))
+   trim_years(c(out, list(source_model = run$model, center = run$center, era = run$era,
+                          co2_multiple = f$co2_multiple, ramp_years = f$ramp_years, co2_pct_per_yr = 1)),
+              run$label)
+}
+
+# The first max_years of each experiment. CMIP5/6 runs are already cut when their files are chosen;
+# this cuts cmip3 runs (no dates in the file names) and checkpoints saved with a larger max_years.
+trim_years = function(d, label){
+   for (ex in c("piControl", "1pctCO2")){
+      n = length(d[[ex]]$T2M)
+      if (n <= max_years) next
+      k = seq_len(max_years)
+      cat(sprintf("  %s %s: kept the first %d of %d yr (max_years)\n", label, d[[ex]]$experiment, max_years, n))
+      d[[ex]]$T2M    = d[[ex]]$T2M[k]
+      d[[ex]]$NETTOA = d[[ex]]$NETTOA[k]
+      if (length(d[[ex]]$years) == n) d[[ex]]$years = d[[ex]]$years[k]
+   }
+   d
 }
 
 # ---- Checkpoints: one finished model per file ----------------------------------------------------
@@ -472,14 +495,21 @@ ckpt_load = function(run, quiet = FALSE){
       if (!quiet) cat("  checkpoint", f, "is unreadable or from a different config; recomputing\n")
       return(NULL)
    }
-   ck$data
+   # A checkpoint holding more years than max_years is cut; one holding fewer is recomputed.
+   # (Checkpoints from before max_years existed hold every year.)
+   saved_max = if (is.null(ck$max_years)) Inf else ck$max_years
+   if (saved_max < max_years){
+      if (!quiet) cat("  checkpoint", f, "holds at most", saved_max, "yr, less than max_years; recomputing\n")
+      return(NULL)
+   }
+   trim_years(ck$data, run$label)
 }
 
 # Written to a temporary name and renamed, so an interruption never leaves a half-written file.
 ckpt_save = function(run, d){
    dir.create(cmip_ckpt_dir, showWarnings = FALSE, recursive = TRUE)
    tmp = paste0(ckpt_path(run$label), ".tmp")
-   saveRDS(list(key = ckpt_key(run), data = d, saved = format(Sys.time())), tmp)
+   saveRDS(list(key = ckpt_key(run), data = d, max_years = max_years, saved = format(Sys.time())), tmp)
    file.rename(tmp, ckpt_path(run$label))
 }
 
@@ -491,6 +521,7 @@ print_run_summary = function(d)
 
 # ---- Main ----------------------------------------------------------------------------------------
 if (dataset == "cmip_1pctCO2"){
+   if (max_years < min_years) stop("max_years (", max_years, ") is less than min_years (", min_years, ")")
    runs = cmip_runs
    if (!is.null(model_subset)){
       bad = setdiff(model_subset, runs$label)

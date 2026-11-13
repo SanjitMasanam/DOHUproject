@@ -24,7 +24,7 @@ Usage (from the repo root):
 
 Output: figures/1pctCO2/1pctCO2_all_models_T2M_vs_NETTOA_kappa.png
 """
-from __future__ import annotations
+
 
 import argparse
 from pathlib import Path
